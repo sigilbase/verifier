@@ -1,0 +1,29 @@
+{
+    "name": "sigilbase/verifier",
+    "description": "Standalone, dependency-free verifier for Sigilbase evidence bundles: recomputes every hash and checks every signature from the bundle's own bytes.",
+    "license": "Apache-2.0",
+    "type": "project",
+    "keywords": ["audit", "tamper-evidence", "merkle", "rfc6962", "rfc3161", "verifier"],
+    "require": {
+        "php": ">=8.2",
+        "ext-sodium": "*"
+    },
+    "suggest": {
+        "ext-zip": "Verify .zip bundles directly; otherwise extract the bundle and pass the directory",
+        "ext-openssl": "Validate RFC 3161 anchor tokens (their absence is reported, never a failure)"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Sigilbase\\Verifier\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
