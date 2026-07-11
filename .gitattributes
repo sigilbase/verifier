@@ -1,0 +1,4 @@
+# Byte-stable checkouts everywhere: verify.php is hash-pinned by the
+# Sigilbase app and recorded by auditors (--print-hashes), so line
+# endings must never vary by platform.
+* text=auto eol=lf
