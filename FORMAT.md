@@ -8,7 +8,7 @@ the verifier's behaviour are authoritative. Anything not specified is not
 part of the format; consumers must ignore unknown fields and files rather
 than reject them.
 
-The current format identifier is **`sigilbase-evidence/1.1`**.
+The current format identifier is **`sigilbase-evidence/1.2`**.
 
 ## Compatibility
 
@@ -19,10 +19,18 @@ bundle format version are distinct:
 | --- | --- | --- |
 | 1.0.x | `sigilbase-evidence/1` | In-app only; never published |
 | 1.1.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1` | Adds anchor validation, `--skip-anchors`, `--consistency` |
+| 1.2.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2` | Adds `payload_state` and the redactions manifest; fails undeclared payload absence |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
 only when the bundle starts at sequence 1).
+
+Format 1.2 is strictly additive over format 1.1: it adds a per-event
+`payload_state` field in `events.ndjson` and the `redactions.json`
+manifest (always present, possibly an empty list). Nothing about the
+hashing changes — a redacted event's entry hash still commits to its
+preserved `payload_hash`, so chains, Merkle roots, signatures, anchors,
+and consistency proofs are computed exactly as in earlier formats.
 
 ## Bundle contents
 
@@ -35,6 +43,7 @@ A bundle is a zip archive (or the equivalent extracted directory):
 | `checkpoints.json` | The signed checkpoints covering the range | 1 |
 | `anchors.json` | RFC 3161 timestamp tokens over checkpoint hashes | 1.1 |
 | `consistency.json` | Cumulative RFC 6962 tree states per checkpoint | 1.1 |
+| `redactions.json` | Declares every event in the range whose payload was redacted | 1.2 |
 | `README.txt` | Plain-language instructions for the bundle holder | 1 |
 | `verify.php` | This verifier, copied into every bundle | 1 |
 
@@ -68,6 +77,36 @@ A bundle is a zip archive (or the equivalent extracted directory):
   `1..n`; a checkpoint's state has `tree_size = sequence_to`. Consistency
   proofs between states follow RFC 6962 §2.1.2 (generation) and RFC 9162
   §2.1.4.2 (verification).
+- **Redacted event** (1.2): an event whose stored payload was destroyed
+  by the exporting tenant after ingestion (hash-preserving redaction). In
+  `events.ndjson` it carries `payload: null` and
+  `payload_state: "redacted"`; every other field — including
+  `payload_hash` — is exactly as written at ingestion. `payload_state` is
+  `"present"` for all other events and may be omitted in pre-1.2 bundles.
+  Each redacted event must have an entry in `redactions.json`:
+  `sequence`, `redacted_at` (RFC 3339), and `declared_by` — a reference
+  (`stream` slug, `sequence`, `entry_hash`) to the `payload.redacted`
+  ledger event recording the act, which may live outside the exported
+  range (it appends to the same stream, or to the tenant's
+  `sigilbase-system` stream when the redacted stream was archived).
+  `declared_by` is advisory context; the acceptance rule is the triple
+  agreement below.
+
+A redacted event verifies through its preserved `payload_hash`: the entry
+preimage commits to the hash rather than the payload bytes, so entry
+hashes, the chain, Merkle roots, signatures, anchors, and consistency
+proofs all recompute without the payload. What cannot be recomputed is
+the payload hash itself — the verifier therefore reports each redaction
+plainly instead of silently trusting it, and the preserved hash retains
+evidential value: a purported original that resurfaces can be checked
+against it.
+
+An absent payload is accepted **only** when all three signals agree:
+`payload_state` is `"redacted"`, `payload` is `null`, and
+`redactions.json` declares the sequence. Any other combination — an
+absent payload without the state, the state with a payload still present,
+a declaration for a present payload, or a redacted event missing from the
+manifest — fails verification. Absence must be declared, never implied.
 
 Field-by-field tables and worked examples live in the docs page; the
 in-repo test corpus (`tests/Feature/Verifier/`) is the executable
@@ -89,6 +128,8 @@ anchor validation. Anchors are validated when PHP's openssl extension is
 available; when it is not, they are reported as present-but-unverified and
 this is never a failure by itself. `--consistency` proves one export
 extends another, from two bundles or from a bundle plus a recorded
-`tree_size`/`root` pair. The verifier makes no network calls and requires
-PHP ≥ 8.2 with ext-sodium (ext-zip for `.zip` input, ext-openssl for
-anchors; nothing else, not even mbstring).
+`tree_size`/`root` pair. Redacted events are reported one line each
+(sequence and redaction date) and counted in the summary; they are never
+silent. The verifier makes no network calls and requires PHP ≥ 8.2 with
+ext-sodium (ext-zip for `.zip` input, ext-openssl for anchors; nothing
+else, not even mbstring).

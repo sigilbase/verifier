@@ -32,6 +32,15 @@ declare(strict_types=1);
  * present-but-unverified, which is never a failure by itself. --skip-anchors
  * silences that.
  *
+ * Bundles at format 1.2 may contain redacted events: the payload was
+ * destroyed by the exporting tenant (hash-preserving redaction), every
+ * hash and all metadata survive, and redactions.json declares each one.
+ * A redacted event verifies through its preserved payload_hash — the
+ * entry hash and the chain recompute exactly as if the payload were
+ * present — and is reported plainly and counted in the summary. A payload
+ * that is absent WITHOUT a matching declaration fails verification:
+ * absence must be declared, never implied.
+ *
  * --consistency proves one export extends another (RFC 6962 consistency
  * over the cumulative tree of entry hashes): give it two bundles that both
  * start at sequence 1, or one such bundle plus a previously recorded root.
@@ -59,7 +68,7 @@ declare(strict_types=1);
  * verifier/format compatibility table. This file makes no network calls
  * of any kind.
  */
-const VERIFIER_VERSION = '1.1.0';
+const VERIFIER_VERSION = '1.2.0';
 
 error_reporting(E_ALL);
 
@@ -1092,8 +1101,8 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
     $format = $manifest instanceof stdClass ? ($manifest->format ?? null) : null;
 
-    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1'], true)) {
-        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1 or /1.1)', 2);
+    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1', 'sigilbase-evidence/1.2'], true)) {
+        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1, /1.1 or /1.2)', 2);
     }
 
     $streamId = $manifest->stream->id ?? null;
@@ -1119,6 +1128,42 @@ function verify_bundle(string $target, bool $skipAnchors): array
     out("Stream: {$streamId}\n");
     out("Range:  {$rangeFrom}..{$rangeTo}\n");
     out('Keys:   '.count($trustedKeys)." trusted signing key(s) in manifest\n\n");
+
+    // ---- redactions.json (1.2, optional) -------------------------------------
+
+    // The redactions manifest declares every event whose payload the tenant
+    // destroyed. It is read before the events so the chain walk below can
+    // demand a declaration for every absent payload. A missing file means
+    // "no redactions declared" — absent payloads then fail.
+    $redactionsBySequence = [];
+    $redactionsPath = $dir.DIRECTORY_SEPARATOR.'redactions.json';
+
+    if (is_file($redactionsPath)) {
+        $redactionsDocument = json_decode((string) file_get_contents($redactionsPath), false);
+        $redactionRecords = $redactionsDocument instanceof stdClass ? ($redactionsDocument->redactions ?? null) : null;
+
+        if (! is_array($redactionRecords)) {
+            report('redactions.json is present but malformed — expected a "redactions" list');
+        } else {
+            foreach ($redactionRecords as $record) {
+                $declaredSequence = $record instanceof stdClass ? ($record->sequence ?? null) : null;
+
+                if (! is_int($declaredSequence)) {
+                    report('redactions.json contains an entry without an integer sequence');
+
+                    continue;
+                }
+
+                if ($declaredSequence < $rangeFrom || $declaredSequence > $rangeTo) {
+                    note("redactions.json declares sequence {$declaredSequence}, outside this bundle's range");
+
+                    continue;
+                }
+
+                $redactionsBySequence[$declaredSequence] = $record;
+            }
+        }
+    }
 
     // ---- events.ndjson -----------------------------------------------------
 
@@ -1154,6 +1199,7 @@ function verify_bundle(string $target, bool $skipAnchors): array
     $prevHash = $rangeFrom === 1 ? str_repeat('0', 64) : null;
 
     $entryHashBySequence = [];
+    $redactedCount = 0;
 
     foreach ($events as $event) {
         $sequence = $event->seq ?? null;
@@ -1168,16 +1214,45 @@ function verify_bundle(string $target, bool $skipAnchors): array
             report("sequence {$sequence}: expected sequence {$expectedSequence} here — an event was deleted, inserted, or reordered");
         }
 
-        // Payload hash: recompute from the payload content itself.
-        try {
-            $canonicalPayload = canonical_encode($event->payload ?? null);
-            $payloadHash = hash('sha256', $canonicalPayload);
+        // Payload hash: recompute from the payload content itself — except
+        // for a redacted event, whose content no longer exists. Redaction
+        // is only accepted when every signal agrees: payload_state says
+        // "redacted", the payload is null, and redactions.json declares
+        // the sequence. Anything less is a failure — an absent payload is
+        // never quietly acceptable.
+        $payloadState = $event->payload_state ?? 'present';
+        $payloadPresent = ($event->payload ?? null) !== null;
+        $declaration = $redactionsBySequence[$sequence] ?? null;
 
-            if (! hash_equals(strtolower((string) ($event->payload_hash ?? '')), $payloadHash)) {
-                report("sequence {$sequence}: payload_hash does not match the payload content — the payload was modified");
+        if (! in_array($payloadState, ['present', 'redacted'], true)) {
+            report("sequence {$sequence}: unknown payload_state ".json_encode($payloadState));
+        } elseif ($payloadState === 'redacted' || ! $payloadPresent) {
+            if ($payloadPresent) {
+                report("sequence {$sequence}: payload_state says redacted but a payload is present — the bundle contradicts itself");
+            } elseif ($payloadState !== 'redacted') {
+                report("sequence {$sequence}: payload is absent but not marked payload_state \"redacted\" — absence must be declared, never implied");
+            } elseif ($declaration === null) {
+                report("sequence {$sequence}: payload is absent without a redactions.json entry — absence must be declared, never implied");
+            } else {
+                $redactedCount++;
+                $redactedAt = is_string($declaration->redacted_at ?? null) ? substr($declaration->redacted_at, 0, 10) : 'an undeclared date';
+                note("sequence {$sequence}: payload redacted {$redactedAt}, hashes preserved, chain verified from the recorded payload_hash");
             }
-        } catch (RuntimeException $exception) {
-            report("sequence {$sequence}: payload cannot be canonicalised ({$exception->getMessage()})");
+        } else {
+            if ($declaration !== null) {
+                report("sequence {$sequence}: redactions.json declares this payload redacted but it is present — the bundle contradicts itself");
+            }
+
+            try {
+                $canonicalPayload = canonical_encode($event->payload ?? null);
+                $payloadHash = hash('sha256', $canonicalPayload);
+
+                if (! hash_equals(strtolower((string) ($event->payload_hash ?? '')), $payloadHash)) {
+                    report("sequence {$sequence}: payload_hash does not match the payload content — the payload was modified");
+                }
+            } catch (RuntimeException $exception) {
+                report("sequence {$sequence}: payload cannot be canonicalised ({$exception->getMessage()})");
+            }
         }
 
         // Chain link: each event must reference the previous entry hash.
@@ -1477,6 +1552,7 @@ function verify_bundle(string $target, bool $skipAnchors): array
         'range_to' => $rangeTo,
         'event_count' => count($events),
         'checkpoint_count' => count($checkpoints),
+        'redacted_count' => $redactedCount,
         'entry_hashes' => $entryHashBySequence,
         'failures' => array_slice($failures, $before),
     ];
@@ -1559,6 +1635,10 @@ if (! $consistencyMode) {
         out("PASS: {$result['event_count']} events and {$result['checkpoint_count']} checkpoints verified for stream {$result['stream_id']} ({$result['range_from']}..{$result['range_to']}).\n");
         out("No event has been modified, deleted, or reordered, and every checkpoint signature is genuine.\n");
 
+        if ($result['redacted_count'] > 0) {
+            out("Redactions: {$result['redacted_count']} payload(s) were redacted by the tenant and are declared in redactions.json; their hashes are preserved and the chain is intact.\n");
+        }
+
         if ($result['range_from'] === 1) {
             $leaves = [];
 
@@ -1583,6 +1663,7 @@ if (! $consistencyMode) {
             'range' => ['from' => $result['range_from'], 'to' => $result['range_to']],
             'events' => $result['event_count'],
             'checkpoints' => $result['checkpoint_count'],
+            'redacted_events' => $result['redacted_count'],
         ],
         'consistency_state' => $consistencyState,
     ]);
