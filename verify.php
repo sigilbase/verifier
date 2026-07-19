@@ -41,6 +41,17 @@ declare(strict_types=1);
  * that is absent WITHOUT a matching declaration fails verification:
  * absence must be declared, never implied.
  *
+ * Bundles at format 1.3 may carry informational qualified-TSA metadata on
+ * anchors (provider name, jurisdiction, qualified flag, signer serial) and
+ * Certificates of Evidence under certificates/, each listed in the
+ * manifest with its SHA-256. The metadata is reported, never trusted: an
+ * anchor's verdict rests on the token's cryptography and the provided
+ * roots alone, and a claimed "qualified" status cannot rescue a token
+ * that fails them. Certificates are documents about the evidence, not
+ * evidence — their hashes are checked so tampering in transit is caught,
+ * and a manifest-listed certificate missing from the bundle is a failure
+ * (evidence with pieces deleted must never pass).
+ *
  * --consistency proves one export extends another (RFC 6962 consistency
  * over the cumulative tree of entry hashes): give it two bundles that both
  * start at sequence 1, or one such bundle plus a previously recorded root.
@@ -68,7 +79,7 @@ declare(strict_types=1);
  * verifier/format compatibility table. This file makes no network calls
  * of any kind.
  */
-const VERIFIER_VERSION = '1.2.0';
+const VERIFIER_VERSION = '1.3.0';
 
 error_reporting(E_ALL);
 
@@ -1101,8 +1112,8 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
     $format = $manifest instanceof stdClass ? ($manifest->format ?? null) : null;
 
-    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1', 'sigilbase-evidence/1.2'], true)) {
-        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1, /1.1 or /1.2)', 2);
+    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1', 'sigilbase-evidence/1.2', 'sigilbase-evidence/1.3'], true)) {
+        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1, /1.1, /1.2 or /1.3)', 2);
     }
 
     $streamId = $manifest->stream->id ?? null;
@@ -1465,8 +1476,54 @@ function verify_bundle(string $target, bool $skipAnchors): array
                 if ($caPem === null) {
                     note("{$label}: signature and imprint verified; no CA chain was provided, so the TSA identity was not verified");
                 }
+
+                // Informational qualified-TSA metadata (format 1.3). Reported
+                // as-is and deliberately kept OUT of the verdict: the exporter
+                // wrote these fields, and a claimed status is not evidence —
+                // only the token's cryptography above is.
+                if (($anchor->qualified ?? null) === true) {
+                    $providerName = is_string($anchor->provider_name ?? null) ? $anchor->provider_name : (string) ($anchor->provider ?? 'unknown');
+                    $jurisdiction = is_string($anchor->jurisdiction ?? null) ? " ({$anchor->jurisdiction})" : '';
+
+                    note("{$label}: the exporter recorded this token as issued by a qualified trust service provider — {$providerName}{$jurisdiction}. Informational: the verdict rests on the cryptographic checks alone");
+                }
             }
         }
+    }
+
+    // ---- certificates/ (format 1.3, optional, informational) -----------------
+
+    $certificateRecords = is_array($manifest->certificates ?? null) ? $manifest->certificates : [];
+
+    if ($certificateRecords !== []) {
+        out('Checking '.count($certificateRecords)." Certificate(s) of Evidence (certificates/)...\n");
+
+        foreach ($certificateRecords as $index => $record) {
+            $recordId = is_string($record->id ?? null) ? $record->id : ('#'.($index + 1));
+            $label = "certificate {$recordId}";
+
+            $file = is_string($record->file ?? null) ? $record->file : null;
+
+            if ($file === null || ! str_starts_with($file, 'certificates/') || str_contains($file, '..')) {
+                report("{$label}: the manifest entry has a missing or unsafe file path");
+
+                continue;
+            }
+
+            $path = $dir.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, $file);
+
+            if (! is_file($path)) {
+                report("{$label}: listed in the manifest but missing from the bundle");
+
+                continue;
+            }
+
+            if (! hash_equals(strtolower((string) ($record->sha256 ?? '')), (string) hash_file('sha256', $path))) {
+                report("{$label}: the file does not match its manifest sha256");
+            }
+        }
+
+        note(count($certificateRecords).' Certificate(s) of Evidence travelled with this bundle. They are documents about the evidence; the cryptographic verification above does not depend on them');
     }
 
     // ---- consistency.json (format 1.1, optional) -----------------------------

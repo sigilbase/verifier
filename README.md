@@ -87,6 +87,14 @@ previously recorded `--root <hex> --size <n>` pair).
 | --- | --- |
 | 1.0.x | `sigilbase-evidence/1` (in-app only; never published) |
 | 1.1.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1` |
+| 1.2.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.2` |
+| 1.3.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.3` |
+
+Format 1.3 bundles may carry informational qualified-TSA metadata on
+anchors and Certificates of Evidence under `certificates/`. The metadata
+is reported, never trusted — an anchor's verdict rests on the token's
+cryptography and the provided roots alone — and certificates are checked
+against their manifest hashes so tampering in transit is caught.
 
 ### Running the tests
 

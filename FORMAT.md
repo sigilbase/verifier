@@ -8,7 +8,7 @@ the verifier's behaviour are authoritative. Anything not specified is not
 part of the format; consumers must ignore unknown fields and files rather
 than reject them.
 
-The current format identifier is **`sigilbase-evidence/1.2`**.
+The current format identifier is **`sigilbase-evidence/1.3`**.
 
 ## Compatibility
 
@@ -20,6 +20,7 @@ bundle format version are distinct:
 | 1.0.x | `sigilbase-evidence/1` | In-app only; never published |
 | 1.1.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1` | Adds anchor validation, `--skip-anchors`, `--consistency` |
 | 1.2.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2` | Adds `payload_state` and the redactions manifest; fails undeclared payload absence |
+| 1.3.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3` | Reports qualified-TSA metadata (informational, never part of the verdict); checks Certificates of Evidence against their manifest hashes |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -31,6 +32,13 @@ manifest (always present, possibly an empty list). Nothing about the
 hashing changes — a redacted event's entry hash still commits to its
 preserved `payload_hash`, so chains, Merkle roots, signatures, anchors,
 and consistency proofs are computed exactly as in earlier formats.
+
+Format 1.3 is strictly additive over format 1.2: anchor records gain
+informational qualified-TSA metadata (`provider_name`, `jurisdiction`,
+`qualified`, `signer_serial`), and Certificates of Evidence issued over
+records inside the exported range may travel under `certificates/`, each
+listed in the manifest's `certificates` array with its SHA-256. Nothing
+about the hashing or verification mathematics changes.
 
 ## Bundle contents
 
@@ -44,6 +52,7 @@ A bundle is a zip archive (or the equivalent extracted directory):
 | `anchors.json` | RFC 3161 timestamp tokens over checkpoint hashes | 1.1 |
 | `consistency.json` | Cumulative RFC 6962 tree states per checkpoint | 1.1 |
 | `redactions.json` | Declares every event in the range whose payload was redacted | 1.2 |
+| `certificates/*.pdf` | Certificates of Evidence covering records in the range, hashes in the manifest | 1.3 |
 | `README.txt` | Plain-language instructions for the bundle holder | 1 |
 | `verify.php` | This verifier, copied into every bundle | 1 |
 
@@ -77,6 +86,23 @@ A bundle is a zip archive (or the equivalent extracted directory):
   `1..n`; a checkpoint's state has `tree_size = sequence_to`. Consistency
   proofs between states follow RFC 6962 §2.1.2 (generation) and RFC 9162
   §2.1.4.2 (verification).
+- **Qualified anchor metadata** (1.3): anchor records may carry
+  `provider_name` (string), `jurisdiction` (string or null), `qualified`
+  (bool or null — the provider's configured status *at anchor time*), and
+  `signer_serial` (uppercase hex of the token signer certificate's serial,
+  or null). All four are informational statements by the exporting
+  instance. Verifiers report them and must never let them influence the
+  verdict: a token claimed qualified that fails the cryptographic checks
+  fails, exactly as any other token does.
+- **Certificate of Evidence** (1.3): a PDF issued by the exporting
+  instance summarising what the mathematics prove about a record or range
+  within the bundle. Each travels under `certificates/` and appears in
+  the manifest's `certificates` array as `id`, `issued_at` (RFC 3339),
+  `scope` (object), `file` (path under `certificates/`), and `sha256`
+  (hex of the file bytes). Certificates are documents about the evidence,
+  not evidence: verifiers check each listed file exists and matches its
+  hash (a listed-but-missing or mismatching file is a failure — evidence
+  with pieces deleted must never pass) and nothing more.
 - **Redacted event** (1.2): an event whose stored payload was destroyed
   by the exporting tenant after ingestion (hash-preserving redaction). In
   `events.ndjson` it carries `payload: null` and
