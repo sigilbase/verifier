@@ -52,6 +52,20 @@ declare(strict_types=1);
  * and a manifest-listed certificate missing from the bundle is a failure
  * (evidence with pieces deleted must never pass).
  *
+ * Bundles at format 1.4 may carry the SigilSign blocks: documents.json
+ * (documents by hash and metadata), signatures.json (signature records
+ * with per-signer facts including the sha256 of the exact version each
+ * signer viewed and signed), and links.json (document ↔ event
+ * associations). They are informational-but-verifiable: every stated fact
+ * is cross-checked against the events themselves — a signed version's
+ * hash must match its ledgered events, each signer's viewed and signed
+ * events must reference the same sha256, and every link must resolve to
+ * its document.linked / document.unlinked event carrying the same hash —
+ * and a contradiction fails the bundle, because metadata must never tell
+ * a different story from the chain. Fields this verifier does not know,
+ * including any claim about legal effect or validity, are ignored
+ * entirely and can never influence the verdict.
+ *
  * --consistency proves one export extends another (RFC 6962 consistency
  * over the cumulative tree of entry hashes): give it two bundles that both
  * start at sequence 1, or one such bundle plus a previously recorded root.
@@ -79,7 +93,7 @@ declare(strict_types=1);
  * verifier/format compatibility table. This file makes no network calls
  * of any kind.
  */
-const VERIFIER_VERSION = '1.3.0';
+const VERIFIER_VERSION = '1.4.0';
 
 error_reporting(E_ALL);
 
@@ -1112,8 +1126,8 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
     $format = $manifest instanceof stdClass ? ($manifest->format ?? null) : null;
 
-    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1', 'sigilbase-evidence/1.2', 'sigilbase-evidence/1.3'], true)) {
-        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1, /1.1, /1.2 or /1.3)', 2);
+    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1', 'sigilbase-evidence/1.2', 'sigilbase-evidence/1.3', 'sigilbase-evidence/1.4'], true)) {
+        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1, /1.1, /1.2, /1.3 or /1.4)', 2);
     }
 
     $streamId = $manifest->stream->id ?? null;
@@ -1524,6 +1538,263 @@ function verify_bundle(string $target, bool $skipAnchors): array
         }
 
         note(count($certificateRecords).' Certificate(s) of Evidence travelled with this bundle. They are documents about the evidence; the cryptographic verification above does not depend on them');
+    }
+
+    // ---- documents.json / signatures.json / links.json (format 1.4, optional) -
+
+    // The SigilSign blocks: documents by hash, signature records, and
+    // document ↔ event links. Informational-but-verifiable: every stated
+    // fact is cross-checked against the events themselves, and a
+    // contradiction FAILS the bundle — metadata must never be able to
+    // tell a different story from the chain. Fields this verifier does
+    // not know — including any claim about legal effect or validity —
+    // are ignored entirely and can never influence the verdict. A
+    // redacted event's facts cannot be cross-checked and are noted, not
+    // failed: redaction is a declared destruction, not a contradiction.
+
+    $eventBySequence = [];
+    $eventsBySigningResource = [];
+
+    foreach ($events as $event) {
+        if (is_int($event->seq ?? null)) {
+            $eventBySequence[$event->seq] = $event;
+        }
+
+        $eventResource = $event->resource ?? null;
+
+        if (is_string($eventResource) && str_starts_with($eventResource, 'signing:')) {
+            $eventsBySigningResource[$eventResource][] = $event;
+        }
+    }
+
+    $documentsPath = $dir.DIRECTORY_SEPARATOR.'documents.json';
+
+    if (is_file($documentsPath)) {
+        out("Checking documents.json (document hashes against the chain)...\n");
+
+        $documentsDocument = json_decode((string) file_get_contents($documentsPath), false);
+        $documentRecords = $documentsDocument instanceof stdClass ? ($documentsDocument->documents ?? null) : null;
+
+        if (! is_array($documentRecords)) {
+            report('documents.json is present but malformed — expected a "documents" list');
+        } else {
+            $checkedVersions = 0;
+
+            foreach ($documentRecords as $record) {
+                $slug = is_string($record->slug ?? null) ? $record->slug : '(unnamed)';
+
+                foreach ((array) ($record->versions ?? []) as $versionRecord) {
+                    $sequence = $versionRecord->published_sequence ?? null;
+                    $statedSha = strtolower((string) ($versionRecord->sha256 ?? ''));
+
+                    if (! is_int($sequence)) {
+                        report("documents.json: document {$slug} lists a version without an integer published_sequence");
+
+                        continue;
+                    }
+
+                    $publishedEvent = $eventBySequence[$sequence] ?? null;
+
+                    if ($publishedEvent === null) {
+                        report("documents.json: document {$slug} points at sequence {$sequence}, which is not in this bundle");
+
+                        continue;
+                    }
+
+                    if (($publishedEvent->action ?? null) !== 'document.published') {
+                        report("documents.json: document {$slug} points at sequence {$sequence}, which is not a document.published event");
+
+                        continue;
+                    }
+
+                    if (! is_object($publishedEvent->payload ?? null)) {
+                        note("documents.json: document {$slug}'s publication at sequence {$sequence} has a redacted payload; the stated hash cannot be cross-checked");
+
+                        continue;
+                    }
+
+                    $ledgeredSha = strtolower((string) ($publishedEvent->payload->sha256 ?? ''));
+
+                    if (! hash_equals($ledgeredSha, $statedSha)) {
+                        report("documents.json: document {$slug} states sha256 {$statedSha} but its document.published event at sequence {$sequence} carries {$ledgeredSha}");
+
+                        continue;
+                    }
+
+                    $checkedVersions++;
+                }
+            }
+
+            note("documents.json: {$checkedVersions} document version hash(es) match their ledgered document.published events");
+        }
+    }
+
+    $signaturesPath = $dir.DIRECTORY_SEPARATOR.'signatures.json';
+
+    if (is_file($signaturesPath)) {
+        out("Checking signatures.json (signature records against the chain)...\n");
+
+        $signaturesDocument = json_decode((string) file_get_contents($signaturesPath), false);
+        $signatureRecords = $signaturesDocument instanceof stdClass ? ($signaturesDocument->signatures ?? null) : null;
+
+        if (! is_array($signatureRecords)) {
+            report('signatures.json is present but malformed — expected a "signatures" list');
+        } else {
+            $checkedSignatures = 0;
+
+            foreach ($signatureRecords as $record) {
+                $signingId = is_string($record->id ?? null) ? $record->id : null;
+
+                if ($signingId === null) {
+                    report('signatures.json contains a record without an id');
+
+                    continue;
+                }
+
+                $label = "signatures.json: signing {$signingId}";
+                $documentSha = strtolower((string) ($record->document->sha256 ?? ''));
+                $signingEvents = $eventsBySigningResource['signing:'.$signingId] ?? [];
+
+                if ($signingEvents === []) {
+                    report("{$label} has no events in this bundle — a stated signing must exist in the chain");
+
+                    continue;
+                }
+
+                // The chain's own story: what each signer saw and signed.
+                $viewedShaByEmail = [];
+                $signedByEmail = [];
+
+                foreach ($signingEvents as $signingEvent) {
+                    $payload = is_object($signingEvent->payload ?? null) ? $signingEvent->payload : null;
+
+                    if ($payload === null) {
+                        continue; // redacted: declared destruction, noted globally below
+                    }
+
+                    $email = is_string($payload->signer->email ?? null) ? strtolower($payload->signer->email) : null;
+
+                    if ($email === null) {
+                        continue;
+                    }
+
+                    if (($signingEvent->action ?? null) === 'signature.viewed') {
+                        $viewedShaByEmail[$email] = strtolower((string) ($payload->sha256 ?? ''));
+                    }
+
+                    if (($signingEvent->action ?? null) === 'signature.signed') {
+                        $signedByEmail[$email] = $payload;
+                    }
+                }
+
+                foreach ($signedByEmail as $email => $payload) {
+                    $signedSha = strtolower((string) ($payload->sha256 ?? ''));
+
+                    // The load-bearing check: the signed hash is the
+                    // document's hash, and it is the hash the same signer
+                    // viewed.
+                    if ($documentSha !== '' && ! hash_equals($signedSha, $documentSha)) {
+                        report("{$label}: the record states document sha256 {$documentSha} but signer {$email}'s signature.signed event carries {$signedSha}");
+                    }
+
+                    if (isset($viewedShaByEmail[$email]) && ! hash_equals($viewedShaByEmail[$email], $signedSha)) {
+                        report("{$label}: signer {$email} viewed sha256 {$viewedShaByEmail[$email]} but signed {$signedSha} — the viewed and signed versions must be the same");
+                    }
+                }
+
+                // Every signer the record claims signed must have a
+                // matching event, with the mark hash agreeing when stated.
+                foreach ((array) ($record->signers ?? []) as $signerRecord) {
+                    if (($signerRecord->status ?? null) !== 'signed') {
+                        continue;
+                    }
+
+                    $email = is_string($signerRecord->email ?? null) ? strtolower($signerRecord->email) : '';
+                    $payload = $signedByEmail[$email] ?? null;
+
+                    if ($payload === null) {
+                        report("{$label}: the record claims {$email} signed but no signature.signed event in this bundle records it");
+
+                        continue;
+                    }
+
+                    $statedMark = strtolower((string) ($signerRecord->signature_sha256 ?? ''));
+                    $ledgeredMark = strtolower((string) ($payload->signature_sha256 ?? ''));
+
+                    if ($statedMark !== '' && $ledgeredMark !== '' && ! hash_equals($ledgeredMark, $statedMark)) {
+                        report("{$label}: {$email}'s stated signature-mark hash does not match the ledgered event");
+                    }
+
+                    $checkedSignatures++;
+                }
+            }
+
+            note("signatures.json: {$checkedSignatures} signature(s) verified against their ledgered events — viewed and signed hashes agree");
+            note('signatures.json is informational metadata: its facts are cross-checked against the chain above, and everything else in it — including any claim about legal effect or validity — is ignored and cannot influence the verdict');
+        }
+    }
+
+    $linksPath = $dir.DIRECTORY_SEPARATOR.'links.json';
+
+    if (is_file($linksPath)) {
+        out("Checking links.json (document ↔ event links against the chain)...\n");
+
+        $linksDocument = json_decode((string) file_get_contents($linksPath), false);
+        $linkRecords = $linksDocument instanceof stdClass ? ($linksDocument->links ?? null) : null;
+
+        if (! is_array($linkRecords)) {
+            report('links.json is present but malformed — expected a "links" list');
+        } else {
+            $resolvedLinks = 0;
+
+            foreach ($linkRecords as $index => $linkRecord) {
+                $linkLabel = 'links.json entry #'.($index + 1);
+                $linkSha = strtolower((string) ($linkRecord->sha256 ?? ''));
+                $resolved = true;
+
+                foreach (['linked_sequence' => 'document.linked', 'unlinked_sequence' => 'document.unlinked'] as $field => $expectedAction) {
+                    $sequence = $linkRecord->{$field} ?? null;
+
+                    if ($sequence === null) {
+                        if ($field === 'linked_sequence') {
+                            report("{$linkLabel} has no linked_sequence — a link must point at its ledgered fact");
+                            $resolved = false;
+                        }
+
+                        continue;
+                    }
+
+                    $linkEvent = is_int($sequence) ? ($eventBySequence[$sequence] ?? null) : null;
+
+                    if ($linkEvent === null || ($linkEvent->action ?? null) !== $expectedAction) {
+                        report("{$linkLabel}: {$field} {$sequence} does not resolve to a {$expectedAction} event in this bundle");
+                        $resolved = false;
+
+                        continue;
+                    }
+
+                    if (! is_object($linkEvent->payload ?? null)) {
+                        note("{$linkLabel}: the {$expectedAction} event at sequence {$sequence} has a redacted payload; its hash cannot be cross-checked");
+
+                        continue;
+                    }
+
+                    $eventSha = strtolower((string) ($linkEvent->payload->sha256 ?? ''));
+
+                    if ($linkSha !== '' && ! hash_equals($eventSha, $linkSha)) {
+                        report("{$linkLabel}: states sha256 {$linkSha} but the {$expectedAction} event at sequence {$sequence} carries {$eventSha}");
+                        $resolved = false;
+                    }
+                }
+
+                if ($resolved) {
+                    $resolvedLinks++;
+                }
+            }
+
+            note("links.json: {$resolvedLinks} link fact(s) resolve to their ledgered document.linked/document.unlinked events with matching hashes");
+            note('a link records that the exporting tenant associated a document with these events at a provable time; it asserts nothing about legal effect, which this verifier neither checks nor reports');
+        }
     }
 
     // ---- consistency.json (format 1.1, optional) -----------------------------

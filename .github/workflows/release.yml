@@ -1,0 +1,48 @@
+name: release
+
+# Every version tag gets a build: the full test matrix must pass, then a
+# GitHub Release is published carrying the exact release artefacts —
+# verify.php, FORMAT.md, and their SHA-256 checksums — so auditors can
+# pin the verifier they run without cloning the repository.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    name: Test PHP ${{ matrix.php }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: sodium, zip, openssl
+          coverage: none
+
+      - run: composer install --no-interaction --no-progress
+
+      - run: vendor/bin/phpunit
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: sha256sum verify.php FORMAT.md > SHA256SUMS
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" verify.php FORMAT.md SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --notes "$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"

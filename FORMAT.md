@@ -8,7 +8,7 @@ the verifier's behaviour are authoritative. Anything not specified is not
 part of the format; consumers must ignore unknown fields and files rather
 than reject them.
 
-The current format identifier is **`sigilbase-evidence/1.3`**.
+The current format identifier is **`sigilbase-evidence/1.4`**.
 
 ## Compatibility
 
@@ -21,6 +21,7 @@ bundle format version are distinct:
 | 1.1.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1` | Adds anchor validation, `--skip-anchors`, `--consistency` |
 | 1.2.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2` | Adds `payload_state` and the redactions manifest; fails undeclared payload absence |
 | 1.3.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3` | Reports qualified-TSA metadata (informational, never part of the verdict); checks Certificates of Evidence against their manifest hashes |
+| 1.4.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3`, `sigilbase-evidence/1.4` | Cross-checks the SigilSign blocks (`documents.json`, `signatures.json`, `links.json`) against the events; a contradiction fails, legal-effect claims never influence the verdict |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -40,6 +41,26 @@ records inside the exported range may travel under `certificates/`, each
 listed in the manifest's `certificates` array with its SHA-256. Nothing
 about the hashing or verification mathematics changes.
 
+Format 1.4 is strictly additive over format 1.3: it adds three optional
+files — `documents.json` (documents by hash and metadata),
+`signatures.json` (signature records with per-signer facts including the
+sha256 of the exact version each signer viewed and signed), and
+`links.json` (document ↔ event associations) — each written only when the
+exported range touches the corresponding facts. All three are
+informational-but-verifiable: their statements are cross-checked against
+the events themselves and a contradiction fails verification, while
+unknown fields — including any claim about legal effect or validity —
+are ignored and can never influence the verdict. Format 1.4 additionally
+reserves `witness.json` (cross-tenant witness proofs: per-checkpoint
+inclusion proofs against a signed tree head of shape `tree_size`,
+`root_hash`, `period`, `timestamp`, `previous_sth_hash`, `signature`)
+and `attestations.json` (the continuous-verification attestation chain:
+records of shape `date`, `streams_verified`, `entries_checked`, `result`,
+`chain_heads_digest`, `previous_attestation_hash`, `signature`). Neither
+is emitted yet; consumers must ignore them until a verifier release
+verifies them. Nothing about the hashing or verification mathematics
+changes.
+
 ## Bundle contents
 
 A bundle is a zip archive (or the equivalent extracted directory):
@@ -53,6 +74,11 @@ A bundle is a zip archive (or the equivalent extracted directory):
 | `consistency.json` | Cumulative RFC 6962 tree states per checkpoint | 1.1 |
 | `redactions.json` | Declares every event in the range whose payload was redacted | 1.2 |
 | `certificates/*.pdf` | Certificates of Evidence covering records in the range, hashes in the manifest | 1.3 |
+| `documents.json` | Documents of the stream by hash and metadata (optional; present when the range covers publications) | 1.4 |
+| `signatures.json` | Signature records with per-signer facts and the viewed/signed version hashes (optional) | 1.4 |
+| `links.json` | Document ↔ event links with their ledgered fact sequences (optional) | 1.4 |
+| `witness.json` | Reserved: cross-tenant witness proofs (specified, not yet emitted) | 1.4 |
+| `attestations.json` | Reserved: continuous-verification attestation chain (specified, not yet emitted) | 1.4 |
 | `README.txt` | Plain-language instructions for the bundle holder | 1 |
 | `verify.php` | This verifier, copied into every bundle | 1 |
 
@@ -103,6 +129,32 @@ A bundle is a zip archive (or the equivalent extracted directory):
   not evidence: verifiers check each listed file exists and matches its
   hash (a listed-but-missing or mismatching file is a failure — evidence
   with pieces deleted must never pass) and nothing more.
+- **SigilSign blocks** (1.4): `documents.json` holds
+  `{"documents": [...]}` — per document `slug`, `title`, `category`,
+  optional `resource`, and `versions` of `version`, `sha256` (hex of the
+  exact file bytes), `size_bytes`, `origin` (`uploaded`, `generated`, or
+  `countersigned`), `published_at` (RFC 3339), `published_sequence`.
+  `signatures.json` holds `{"signatures": [...]}` — per record `id`,
+  `document` (`slug`, `version`, `sha256`), `order` (`parallel` |
+  `sequential`), `status` (`open` | `completed` | `voided`), optional
+  `completed_at`, `event_sequences`, and `signers` of `position`, `name`,
+  `email`, optional `role`, `status`, optional `viewed_sha256`,
+  `signed_at`, `intent_statement`, `signature_sha256` (hex of the
+  signature-mark image bytes), `email_confirmed`. `links.json` holds
+  `{"links": [...]}` — per link `sha256` (the linked artefact's hash),
+  `source_type`, `target` (`type`, `reference`, and the type's fields),
+  `linked_sequence`, optional `unlinked_sequence`, `active`. Verifiers
+  must cross-check every stated hash and sequence against the events —
+  a version's `published_sequence` must be its `document.published`
+  event carrying the same `sha256`; a signer's `signature.viewed` and
+  `signature.signed` events must reference the same `sha256`, which is
+  the document's; a link's sequences must resolve to
+  `document.linked`/`document.unlinked` events carrying the same
+  `sha256` — and fail on contradiction. Unknown fields, including any
+  claim about legal effect or validity, are ignored and must never
+  influence the verdict. These blocks state what a tenant's workspace
+  recorded; signatures are simple electronic signatures and the format
+  asserts nothing about their effect in any jurisdiction.
 - **Redacted event** (1.2): an event whose stored payload was destroyed
   by the exporting tenant after ingestion (hash-preserving redaction). In
   `events.ndjson` it carries `payload: null` and
