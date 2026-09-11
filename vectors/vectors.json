@@ -26,8 +26,24 @@
             "canonical": "[1,2,3]"
         },
         {
-            "value": {},
-            "canonical": "{}"
+            "value": {
+                "outer": {
+                    "inner": [
+                        1,
+                        2
+                    ]
+                },
+                "z": true
+            },
+            "canonical": "{\"outer\":{\"inner\":[1,2]},\"z\":true}"
+        },
+        {
+            "value": {
+                "tab": "a\tb",
+                "quote": "say \"hi\"",
+                "unicode": "naïve"
+            },
+            "canonical": "{\"quote\":\"say \\\"hi\\\"\",\"tab\":\"a\\tb\",\"unicode\":\"naïve\"}"
         }
     ],
     "entry_hash": {
