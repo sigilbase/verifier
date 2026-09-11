@@ -21,7 +21,7 @@ bundle format version are distinct:
 | 1.1.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1` | Adds anchor validation, `--skip-anchors`, `--consistency` |
 | 1.2.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2` | Adds `payload_state` and the redactions manifest; fails undeclared payload absence |
 | 1.3.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3` | Reports qualified-TSA metadata (informational, never part of the verdict); checks Certificates of Evidence against their manifest hashes |
-| 1.4.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3`, `sigilbase-evidence/1.4` | Cross-checks the SigilSign blocks (`documents.json`, `signatures.json`, `links.json`) against the events; a contradiction fails, legal-effect claims never influence the verdict |
+| 1.4.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3`, `sigilbase-evidence/1.4` | Cross-checks the SigilSign blocks (`documents.json`, `signatures.json`, `links.json`) against the events; a contradiction fails, legal-effect claims never influence the verdict. 1.4.1 holds every issuer in an anchor token's certificate chain to CA rules (see *Anchor token* below); a chain through a non-CA certificate now fails. 1.4.2 holds every checkpoint to its signing key's active window (see *Checkpoint signature* below); a checkpoint dated after its key's `retired_at`, or before its `created_at`, now fails even with a verifying signature |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -101,13 +101,37 @@ A bundle is a zip archive (or the equivalent extracted directory):
   `from..to`), `prev_checkpoint`, `created_at` (RFC 3339 UTC,
   microseconds).
 - **Checkpoint signature**: Ed25519 over the raw 32 bytes of the
-  checkpoint hash. Trusted public keys are listed in the manifest.
+  checkpoint hash. Trusted public keys are listed in the manifest, each
+  with its active window: `created_at` (RFC 3339) and `retired_at` (RFC
+  3339, or null while the key is active). A signature is authoritative
+  only for checkpoints sealed inside that window: the checkpoint's
+  `created_at` — part of the signed preimage — must not be before the
+  key's `created_at` nor after its `retired_at`, compared as exact
+  instants. A checkpoint outside its key's window fails even though its
+  signature verifies, because a retired key vouches for nothing sealed
+  after its retirement and no key vouches for anything sealed before it
+  existed. A window field absent from the manifest leaves that bound
+  unchecked; a present but unparseable one fails.
 - **Anchor token** (1.1): a DER RFC 3161 `TimeStampToken` (RFC 5652 CMS
   `SignedData` over a `TSTInfo`) whose message imprint is SHA-256 over the
   raw 32 bytes of the checkpoint hash. `token` is base64 of the DER;
   `token_hash` is SHA-256 hex of the DER; `ca_pem`, when present, is the
   TSA chain as configured by the exporting instance (advisory — obtain the
-  TSA root independently for full trust).
+  TSA root independently for full trust). A token validates when its
+  imprint is SHA-256 of the checkpoint hash, its signed `messageDigest`
+  matches the `TSTInfo`, its CMS signature verifies against the signer
+  certificate embedded in the token, and that signer carries the
+  timestamping extended key usage (1.3.6.1.5.5.7.3.8) and was valid at
+  `genTime`. When a CA is available, the signer must additionally chain to
+  a self-signed root present in the CA (intermediates may come from the
+  token; a root found only inside the token never counts), and every
+  issuer on that path — intermediates and root alike — must be a CA that
+  was valid at `genTime`: `basicConstraints` present with `cA` TRUE (an
+  absent extension counts as FALSE), `keyCertSign` set when a `keyUsage`
+  extension is present, and no more intermediates beneath it than its
+  `pathLenConstraint` allows. Without the issuer rules, an ordinary
+  end-entity certificate under a trusted root could issue a "timestamping"
+  signer whose every signature verifies.
 - **Cumulative tree state** (1.1): the RFC 6962 tree over entry hashes
   `1..n`; a checkpoint's state has `tree_size = sequence_to`. Consistency
   proofs between states follow RFC 6962 §2.1.2 (generation) and RFC 9162
@@ -208,6 +232,9 @@ this is never a failure by itself. `--consistency` proves one export
 extends another, from two bundles or from a bundle plus a recorded
 `tree_size`/`root` pair. Redacted events are reported one line each
 (sequence and redaction date) and counted in the summary; they are never
-silent. The verifier makes no network calls and requires PHP ≥ 8.2 with
+silent. Every checkpoint is checked against its signing key's window as
+well as its signature: one dated outside the key's `created_at`..`retired_at`
+range fails naming the checkpoint, its `created_at`, and the bound it
+violates. The verifier makes no network calls and requires PHP ≥ 8.2 with
 ext-sodium (ext-zip for `.zip` input, ext-openssl for anchors; nothing
 else, not even mbstring).

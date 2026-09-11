@@ -89,12 +89,22 @@ previously recorded `--root <hex> --size <n>` pair).
 | 1.1.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1` |
 | 1.2.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.2` |
 | 1.3.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.3` |
+| 1.4.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.4` |
 
 Format 1.3 bundles may carry informational qualified-TSA metadata on
 anchors and Certificates of Evidence under `certificates/`. The metadata
 is reported, never trusted — an anchor's verdict rests on the token's
 cryptography and the provided roots alone — and certificates are checked
-against their manifest hashes so tampering in transit is caught.
+against their manifest hashes so tampering in transit is caught. Format
+1.4 adds the SigilSign blocks, cross-checked against the events. From
+1.4.1 the anchor chain walk holds every issuer to CA rules (basicConstraints
+`cA`, `keyCertSign`, validity at `genTime`, `pathLenConstraint`), so a
+"timestamping" signer issued by an ordinary end-entity certificate under a
+trusted root fails; see FORMAT.md, *Anchor token*. From 1.4.2 every
+checkpoint must be dated inside its signing key's active window (the
+manifest's `created_at`/`retired_at` per key), so a retired key cannot
+vouch for checkpoints sealed after its retirement; see FORMAT.md,
+*Checkpoint signature*.
 
 ### Running the tests
 

@@ -22,7 +22,10 @@ declare(strict_types=1);
  * application or database: every event hash is recomputed from the event's
  * own fields, the hash chain is re-walked, each checkpoint's Merkle root is
  * rebuilt from the events it covers, and every checkpoint signature is
- * checked against the Ed25519 public keys listed in the manifest.
+ * checked against the Ed25519 public keys listed in the manifest — with
+ * each checkpoint's seal time required to fall inside its signing key's
+ * active window (the manifest's created_at/retired_at per key), so a
+ * retired key vouches for nothing sealed after its retirement.
  *
  * Bundles at format 1.1 may carry RFC 3161 timestamp tokens (anchors.json)
  * proving to a third party WHEN each checkpoint existed. When PHP's openssl
@@ -93,7 +96,7 @@ declare(strict_types=1);
  * verifier/format compatibility table. This file makes no network calls
  * of any kind.
  */
-const VERIFIER_VERSION = '1.4.0';
+const VERIFIER_VERSION = '1.4.2';
 
 error_reporting(E_ALL);
 
@@ -601,6 +604,28 @@ function der_decode_generalized_time(string $content): int
     return $timestamp;
 }
 
+/**
+ * An X.509 Time as a Unix timestamp: UTCTime (YYMMDDHHMMSSZ — two-digit
+ * years 50–99 mean 1950–1999, 00–49 mean 2000–2049) or GeneralizedTime,
+ * per RFC 5280 §4.1.2.5. Certificate validity fields use either.
+ *
+ * @param  array{class: int, constructed: bool, number: int, content: string, total: int}  $element
+ */
+function der_decode_time(array $element): int
+{
+    if ($element['class'] === 0 && $element['number'] === 0x18) {
+        return der_decode_generalized_time($element['content']);
+    }
+
+    if ($element['class'] !== 0 || $element['number'] !== 0x17 || preg_match('/^(\d{2})(\d{10})Z$/', $element['content'], $m) !== 1) {
+        throw new RuntimeException('unsupported X.509 Time encoding');
+    }
+
+    $century = (int) $m[1] >= 50 ? '19' : '20';
+
+    return der_decode_generalized_time("{$century}{$m[1]}{$m[2]}Z");
+}
+
 // ---------------------------------------------------------------------------
 // RFC 3161 anchor token parsing and validation
 // ---------------------------------------------------------------------------
@@ -754,7 +779,11 @@ function anchor_parse_token(string $der): array
 }
 
 /**
- * @return array{serial: string, issuer: string, subject: string}
+ * The pieces of a certificate's tbsCertificate that chain building and the
+ * issuer checks need. validity and extensions stay as raw elements: they
+ * are decoded only for certificates acting as issuers.
+ *
+ * @return array{serial: string, issuer: string, subject: string, validity: array{class: int, constructed: bool, number: int, content: string, total: int}, extensions: array{class: int, constructed: bool, number: int, content: string, total: int}|null}
  */
 function anchor_cert_parts(string $certificateDer): array
 {
@@ -772,11 +801,163 @@ function anchor_cert_parts(string $certificateDer): array
         throw new RuntimeException('tbsCertificate is malformed');
     }
 
+    $extensions = null;
+
+    // issuerUniqueID [1], subjectUniqueID [2], extensions [3]: all optional,
+    // all context-tagged, after subjectPublicKeyInfo.
+    foreach (array_slice($tbs, $base + 6) as $optional) {
+        if ($optional['class'] === 2 && $optional['number'] === 3) {
+            $extensions = $optional;
+        }
+    }
+
     return [
         'serial' => ltrim($tbs[$base]['content'], "\x00"),
         'issuer' => der_reencode($tbs[$base + 2]),
         'subject' => der_reencode($tbs[$base + 4]),
+        'validity' => $tbs[$base + 3],
+        'extensions' => $extensions,
     ];
+}
+
+/**
+ * The certificate's extensions as extnID => extnValue content (the DER of
+ * each extension's own type). Bounded like the rest of the reader: fixed
+ * nesting, no recursion.
+ *
+ * @param  array{class: int, constructed: bool, number: int, content: string, total: int}|null  $wrapper  the [3] EXPLICIT Extensions element, when the certificate has one
+ * @return array<string, string>
+ */
+function anchor_cert_extensions(?array $wrapper): array
+{
+    if ($wrapper === null) {
+        return [];
+    }
+
+    $extensions = [];
+
+    // Extensions ::= SEQUENCE OF Extension { extnID OID, critical BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }
+    foreach (der_children(der_read($wrapper['content'])['content']) as $extension) {
+        $fields = der_children($extension['content']);
+
+        if (count($fields) < 2 || $fields[0]['number'] !== 0x06) {
+            throw new RuntimeException('certificate extension is malformed');
+        }
+
+        $value = $fields[count($fields) - 1];
+
+        if ($value['number'] !== 0x04) {
+            throw new RuntimeException('certificate extension value is malformed');
+        }
+
+        $extensions[der_decode_oid($fields[0]['content'])] = $value['content'];
+    }
+
+    return $extensions;
+}
+
+/**
+ * RFC 5280 §6.1.4 on a certificate acting as an issuer in the chain: it
+ * must be a CA (basicConstraints cA TRUE — an absent extension counts as
+ * FALSE, as the standard says), be permitted to sign certificates
+ * (keyCertSign, when the keyUsage extension is present), have been valid
+ * at genTime, and allow the number of intermediates beneath it when it
+ * declares a pathLenConstraint. Without this, anyone holding an ordinary
+ * end-entity certificate under a trusted root could issue a "timestamping"
+ * signer beneath it, and every signature in the chain would verify. The
+ * self-signed root is held to the same rules.
+ *
+ * @param  int  $intermediatesBelow  CA certificates between this issuer and the signer
+ * @return list<string> failures
+ */
+function anchor_issuer_problems(string $issuerDer, int $genTime, int $intermediatesBelow): array
+{
+    try {
+        $parts = anchor_cert_parts($issuerDer);
+        $validity = der_children($parts['validity']['content']);
+
+        if (count($validity) < 2) {
+            throw new RuntimeException('validity is malformed');
+        }
+
+        $notBefore = der_decode_time($validity[0]);
+        $notAfter = der_decode_time($validity[1]);
+        $extensions = anchor_cert_extensions($parts['extensions']);
+    } catch (RuntimeException) {
+        return ['an issuer certificate in the chain does not parse'];
+    }
+
+    $problems = [];
+
+    if ($genTime < $notBefore || $genTime > $notAfter) {
+        $problems[] = 'an issuer certificate in the chain was not valid at genTime';
+    }
+
+    $basicConstraints = $extensions['2.5.29.19'] ?? null;
+
+    if ($basicConstraints === null) {
+        $problems[] = 'an issuer certificate in the chain is not a CA: it carries no basicConstraints extension';
+    } else {
+        $isCa = false;
+        $pathLength = null;
+
+        try {
+            // BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER (0..MAX) OPTIONAL }
+            $sequence = der_read($basicConstraints);
+
+            if ($sequence['class'] !== 0 || $sequence['number'] !== 0x10) {
+                throw new RuntimeException('basicConstraints is not a SEQUENCE');
+            }
+
+            foreach (der_children($sequence['content']) as $field) {
+                if ($field['class'] !== 0) {
+                    continue;
+                }
+
+                if ($field['number'] === 0x01) {
+                    $isCa = strlen($field['content']) === 1 && $field['content'] !== "\x00";
+                } elseif ($field['number'] === 0x02) {
+                    $bytes = ltrim($field['content'], "\x00");
+                    // Anything wider than four octets is beyond any chain this walk accepts.
+                    $pathLength = strlen($bytes) > 4 ? PHP_INT_MAX : (int) hexdec(bin2hex($bytes === '' ? "\x00" : $bytes));
+                }
+            }
+        } catch (RuntimeException) {
+            return [...$problems, 'an issuer certificate in the chain has a malformed basicConstraints extension'];
+        }
+
+        if (! $isCa) {
+            $problems[] = 'an issuer certificate in the chain is not a CA: basicConstraints cA is FALSE';
+        } elseif ($pathLength !== null && $intermediatesBelow > $pathLength) {
+            $problems[] = 'an issuer certificate in the chain has more intermediates beneath it than its pathLenConstraint allows';
+        }
+    }
+
+    $keyUsage = $extensions['2.5.29.15'] ?? null;
+
+    if ($keyUsage !== null && ! anchor_key_usage_permits_cert_sign($keyUsage)) {
+        $problems[] = 'an issuer certificate in the chain is not permitted to sign certificates: keyUsage lacks keyCertSign';
+    }
+
+    return $problems;
+}
+
+/**
+ * KeyUsage ::= BIT STRING — the first content octet counts unused trailing
+ * bits; keyCertSign is bit 5 (0x04) of the first data octet.
+ */
+function anchor_key_usage_permits_cert_sign(string $extnValue): bool
+{
+    try {
+        $bitString = der_read($extnValue);
+    } catch (RuntimeException) {
+        return false;
+    }
+
+    return $bitString['class'] === 0
+        && $bitString['number'] === 0x03
+        && strlen($bitString['content']) >= 2
+        && (ord($bitString['content'][1]) & 0x04) !== 0;
 }
 
 function anchor_der_to_pem(string $der): string
@@ -805,9 +986,13 @@ function anchor_pem_certificates(string $pem): array
 }
 
 /**
- * Validate one parsed token against the message it must attest to.
- * Requires ext-openssl (the caller checks). $caPem may be null: chain
- * verification is then skipped and reported by the caller.
+ * Validate one parsed token against the message it must attest to: the
+ * imprint, the messageDigest attribute, the CMS signature, the signer's
+ * timestamping EKU and validity at genTime, and — when a CA is given — the
+ * chain from the signer to a self-signed root inside $caPem, every issuer
+ * along it being a CA (anchor_issuer_problems). Requires ext-openssl (the
+ * caller checks). $caPem may be null: chain verification is then skipped
+ * and reported by the caller.
  *
  * @param  array{imprint_alg: string, imprint: string, gen_time: int, certs: list<string>, signer_issuer: string, signer_serial: string, signed_attrs_set: string, content_type_attr: string, message_digest_attr: string, digest_alg: string, sig_alg: string, signature: string, tst_info: string}  $token
  * @return list<string> failures
@@ -984,6 +1169,14 @@ function anchor_validate(array $token, string $message, ?string $caPem): array
                 return $failures;
             }
 
+            // Only a CA may issue. $depth intermediates already sit between
+            // this issuer and the signer.
+            $problems = anchor_issuer_problems($issuer, $token['gen_time'], $depth);
+
+            if ($problems !== []) {
+                return [...$failures, ...$problems];
+            }
+
             $current = $issuer;
         }
 
@@ -1108,6 +1301,71 @@ function note(string $message): void
 }
 
 /**
+ * Parse the one timestamp shape the bundle format uses (RFC 3339, UTC,
+ * microseconds); anything else is not a time this verifier will trust.
+ */
+function parse_rfc3339(mixed $value): ?DateTimeImmutable
+{
+    if (! is_string($value) || preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/', $value) !== 1) {
+        return null;
+    }
+
+    return new DateTimeImmutable($value);
+}
+
+/**
+ * A trusted key vouches only for checkpoints sealed while it held
+ * authority. created_at is inside the signed checkpoint preimage, so a
+ * checkpoint dated after the key's retired_at (or before its created_at)
+ * was either signed by a retired key or carries a forged seal time. An
+ * absent window field leaves that bound unchecked (a manifest predating
+ * it); a present but unparseable one fails, because it cannot be trusted.
+ *
+ * @param  array{created_at: mixed, retired_at: mixed}  $key
+ * @return list<string>
+ */
+function signing_key_window_problems(array $key, string $sealedAtValue): array
+{
+    $sealedAt = parse_rfc3339($sealedAtValue);
+
+    if ($sealedAt === null) {
+        return ["created_at [{$sealedAtValue}] is not an RFC 3339 timestamp, so the signing key window cannot be checked"];
+    }
+
+    $problems = [];
+
+    if ($key['created_at'] !== null) {
+        $keyCreatedAt = parse_rfc3339($key['created_at']);
+
+        if ($keyCreatedAt === null) {
+            $problems[] = "the manifest's created_at for the signing key is unparseable, so the key window cannot be checked";
+        } elseif ($sealedAt < $keyCreatedAt) {
+            $problems[] = sprintf(
+                'created_at %s is before the signing key was created (%s) — the key had no authority yet',
+                $sealedAtValue,
+                $key['created_at'],
+            );
+        }
+    }
+
+    if ($key['retired_at'] !== null) {
+        $keyRetiredAt = parse_rfc3339($key['retired_at']);
+
+        if ($keyRetiredAt === null) {
+            $problems[] = "the manifest's retired_at for the signing key is unparseable, so the key window cannot be checked";
+        } elseif ($sealedAt > $keyRetiredAt) {
+            $problems[] = sprintf(
+                "created_at %s is after the signing key's retired_at %s — a retired key signed this checkpoint",
+                $sealedAtValue,
+                $key['retired_at'],
+            );
+        }
+    }
+
+    return $problems;
+}
+
+/**
  * Fully verify one bundle. Prints progress; failures land in the global
  * list AND the returned array.
  *
@@ -1138,11 +1396,16 @@ function verify_bundle(string $target, bool $skipAnchors): array
         fail_hard('manifest.json is missing stream id or range');
     }
 
+    // Each trusted key carries its active window: created_at and retired_at
+    // (null while active) as the manifest states them.
     $trustedKeys = [];
 
     foreach ($manifest->signing_keys ?? [] as $key) {
         if (isset($key->public_key) && is_string($key->public_key)) {
-            $trustedKeys[strtolower($key->public_key)] = true;
+            $trustedKeys[strtolower($key->public_key)] = [
+                'created_at' => $key->created_at ?? null,
+                'retired_at' => $key->retired_at ?? null,
+            ];
         }
     }
 
@@ -1373,6 +1636,10 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
         if (! isset($trustedKeys[$publicKeyHex])) {
             report("checkpoint {$from}..{$to}: signed by a key that is not in the manifest's signing keys");
+        } else {
+            foreach (signing_key_window_problems($trustedKeys[$publicKeyHex], (string) ($checkpoint->created_at ?? '')) as $problem) {
+                report("checkpoint {$from}..{$to}: {$problem}");
+            }
         }
 
         $signature = hex2bin((string) ($checkpoint->signature ?? ''));
