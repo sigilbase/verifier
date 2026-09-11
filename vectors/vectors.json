@@ -1,0 +1,100 @@
+{
+    "note": "Golden vectors for the hashed constructions. Inputs and outputs, both fixed for the life of v1.",
+    "canonical_json": [
+        {
+            "value": {
+                "amount": 1250,
+                "currency": "GBP",
+                "note": "a \"quoted\" value, é"
+            },
+            "canonical": "{\"amount\":1250,\"currency\":\"GBP\",\"note\":\"a \\\"quoted\\\" value, é\"}",
+            "sha256": "949b3ea2c16b0107cac58f400e23b802a8e16ab372bc6c86d8632519f31e260d"
+        },
+        {
+            "value": {
+                "b": 1,
+                "a": 2
+            },
+            "canonical": "{\"a\":2,\"b\":1}"
+        },
+        {
+            "value": [
+                1,
+                2,
+                3
+            ],
+            "canonical": "[1,2,3]"
+        },
+        {
+            "value": {},
+            "canonical": "{}"
+        }
+    ],
+    "entry_hash": {
+        "stream": "01890000-0000-7000-8000-000000000001",
+        "seq": 1,
+        "occurred_at": "2026-01-02T03:04:05.000000Z",
+        "received_at": "2026-01-02T03:04:06.000000Z",
+        "actor": "user:42",
+        "action": "invoice.voided",
+        "resource": "invoice:inv_9f21",
+        "payload_hash": "949b3ea2c16b0107cac58f400e23b802a8e16ab372bc6c86d8632519f31e260d",
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "preimage": "{\"action\":\"invoice.voided\",\"actor\":\"user:42\",\"occurred_at\":\"2026-01-02T03:04:05.000000Z\",\"payload_hash\":\"949b3ea2c16b0107cac58f400e23b802a8e16ab372bc6c86d8632519f31e260d\",\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"received_at\":\"2026-01-02T03:04:06.000000Z\",\"resource\":\"invoice:inv_9f21\",\"seq\":1,\"stream\":\"01890000-0000-7000-8000-000000000001\",\"v\":1}",
+        "entry_hash": "234c2a2cd7e937b336639e5a691b4420f3ffd0b7ab5c9b9e3bd4c3573184d98c"
+    },
+    "chain_link": {
+        "note": "The second entry commits to the first through prev.",
+        "prev": "234c2a2cd7e937b336639e5a691b4420f3ffd0b7ab5c9b9e3bd4c3573184d98c",
+        "entry_hash": "5b92761f6637911706488d705b451b84c3764664a3a9f33bc5b04943973f3c51"
+    },
+    "merkle_root": {
+        "leaves": [
+            "234c2a2cd7e937b336639e5a691b4420f3ffd0b7ab5c9b9e3bd4c3573184d98c",
+            "5b92761f6637911706488d705b451b84c3764664a3a9f33bc5b04943973f3c51"
+        ],
+        "root": "7d1f643ed662fe16fc0eb2715d5a33c70ddf562c2eac24d66504c53a7375424e",
+        "rfc6962_reference": [
+            {
+                "leaves": 1,
+                "root": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+            },
+            {
+                "leaves": 2,
+                "root": "fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125"
+            },
+            {
+                "leaves": 3,
+                "root": "fc0b4d8f280d7762c2531d01d691a2abaa2d8f29a8fa339c114fdded2acfe78a"
+            },
+            {
+                "leaves": 4,
+                "root": "3e0343bbcc8b18ecc8abfeae47a81177abce0e33ab5a9d3bf9ac6011ee680945"
+            },
+            {
+                "leaves": 5,
+                "root": "dff9f09cac5952fd9a97e06828dc5677a42f11a521c1166204b7b992f7e48d83"
+            },
+            {
+                "leaves": 6,
+                "root": "9ddb9449b221bf8f264a48be8bc034b9f4a65669efdd42241da28075de4f0cd4"
+            }
+        ]
+    },
+    "checkpoint": {
+        "stream": "01890000-0000-7000-8000-000000000001",
+        "from": 1,
+        "to": 2,
+        "root": "7d1f643ed662fe16fc0eb2715d5a33c70ddf562c2eac24d66504c53a7375424e",
+        "prev_checkpoint": "0000000000000000000000000000000000000000000000000000000000000000",
+        "created_at": "2026-01-02T03:04:09.000000Z",
+        "preimage": "{\"created_at\":\"2026-01-02T03:04:09.000000Z\",\"from\":1,\"prev_checkpoint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"root\":\"7d1f643ed662fe16fc0eb2715d5a33c70ddf562c2eac24d66504c53a7375424e\",\"stream\":\"01890000-0000-7000-8000-000000000001\",\"to\":2,\"v\":1}",
+        "checkpoint_hash": "37285f17786867eda4150377bdcccf0ec68ce4320db32cca36a59a7d4db66391"
+    },
+    "checkpoint_signature": {
+        "note": "Ed25519 over the raw 32 bytes of checkpoint_hash, under the published test key.",
+        "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "signature": "0ec70f0c5a401cf1ba2a4c85b4a85177f40fea6a014201526fb4dcec5c056e69cc4a3cb649786e7ddfd50b3de5c215e6bd0ca2d90336775e4e3fdedd7b3c3408"
+    }
+}
