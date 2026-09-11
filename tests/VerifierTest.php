@@ -42,12 +42,24 @@ final class VerifierTest extends TestCase
     }
 
     /**
+     * The fixture generator signs with a throwaway key, which is not - and
+     * must never be - in the released trusted set. So every run says which
+     * key it trusts, exactly as an auditor with a private deployment
+     * would. A test that wants to see an unknown key passes --keys itself,
+     * or passes --no-keys to skip this default.
+     *
      * @param  list<string>  $arguments
      * @return array{code: int, stdout: string, stderr: string}
      */
     private function runVerifier(array $arguments): array
     {
         $command = escapeshellarg(PHP_BINARY).' '.escapeshellarg(dirname(__DIR__).'/verify.php');
+
+        if (in_array('--no-keys', $arguments, true)) {
+            $arguments = array_values(array_filter($arguments, static fn (string $a): bool => $a !== '--no-keys'));
+        } elseif (! in_array('--keys', $arguments, true)) {
+            $arguments = ['--keys', $this->trustedKeysFile(), ...$arguments];
+        }
 
         foreach ($arguments as $argument) {
             $command .= ' '.escapeshellarg($argument);
@@ -69,6 +81,24 @@ final class VerifierTest extends TestCase
     private function bundleDir(): string
     {
         return $this->generator->writeBundle($this->workDir.DIRECTORY_SEPARATOR.'bundle');
+    }
+
+    /** A --keys file naming the fixture generator's signing key. */
+    private function trustedKeysFile(): string
+    {
+        $path = $this->workDir.DIRECTORY_SEPARATOR.'trusted-keys.json';
+
+        if (! is_file($path)) {
+            file_put_contents($path, (string) json_encode(['keys' => [[
+                'key_id' => substr(hash('sha256', (string) hex2bin($this->generator->publicKeyHex)), 0, 16),
+                'public_key' => $this->generator->publicKeyHex,
+                'algorithm' => 'ed25519',
+                'created_at' => '2026-01-01T00:00:00.000000Z',
+                'retired_at' => null,
+            ]]], JSON_PRETTY_PRINT));
+        }
+
+        return $path;
     }
 
     // -- The happy path -------------------------------------------------------
@@ -294,8 +324,13 @@ final class VerifierTest extends TestCase
         $run = $this->runVerifier(['--print-hashes', $zip]);
 
         self::assertSame(0, $run['code']);
+
+        // From 1.5 the verifier's own version and hash are printed on
+        // every run, not only under --print-hashes: comparing them with
+        // the release notes is the whole reason for publishing the hash,
+        // and a reader should not have to know a flag to get it.
         self::assertStringContainsString(
-            'Verifier sha256: '.hash_file('sha256', dirname(__DIR__).'/verify.php'),
+            'Verifier: v'.VERIFIER_VERSION.' sha256 '.hash_file('sha256', dirname(__DIR__).'/verify.php'),
             $run['stdout'],
         );
         self::assertStringContainsString('Bundle sha256:  '.hash_file('sha256', $zip), $run['stdout']);

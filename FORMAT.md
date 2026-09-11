@@ -8,7 +8,7 @@ the verifier's behaviour are authoritative. Anything not specified is not
 part of the format; consumers must ignore unknown fields and files rather
 than reject them.
 
-The current format identifier is **`sigilbase-evidence/1.4`**.
+The current format identifier is **`sigilbase-evidence/1.5`**.
 
 ## Compatibility
 
@@ -22,6 +22,7 @@ bundle format version are distinct:
 | 1.2.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2` | Adds `payload_state` and the redactions manifest; fails undeclared payload absence |
 | 1.3.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3` | Reports qualified-TSA metadata (informational, never part of the verdict); checks Certificates of Evidence against their manifest hashes |
 | 1.4.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3`, `sigilbase-evidence/1.4` | Cross-checks the SigilSign blocks (`documents.json`, `signatures.json`, `links.json`) against the events; a contradiction fails, legal-effect claims never influence the verdict. 1.4.1 holds every issuer in an anchor token's certificate chain to CA rules (see *Anchor token* below); a chain through a non-CA certificate now fails. 1.4.2 holds every checkpoint to its signing key's active window (see *Checkpoint signature* below); a checkpoint dated after its key's `retired_at`, or before its `created_at`, now fails even with a verifying signature |
+| 1.5.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Reports five results (content integrity, signing identity, timestamps, scope, redactions) and four exit codes (0 pass, 1 fail, 2 error, 3 unconfirmed). Carries a trusted signing key set and timestamp trust roots, so a bundle signed with a key the verifier does not know is UNCONFIRMED rather than PASS; `--keys` and `--tsa-roots` replace either set. An absent payload is accepted only against an authenticated declaration in the bundle that names that event, so a bundle below 1.5 carrying an absent payload now fails and must be exported again. Reads `events.ndjson` a line at a time, so bundle size no longer bounds who can verify |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -61,6 +62,26 @@ is emitted yet; consumers must ignore them until a verifier release
 verifies them. Nothing about the hashing or verification mathematics
 changes.
 
+Format 1.5 is strictly additive over format 1.4: it adds
+`declarations.ndjson` (full entry records for every declaration covering
+an absent payload in the exported range, including any supplementary
+declaration and the original it references) and
+`declaration_proofs.json` (for declarations outside the exported range:
+an audit path to the checkpoint that sealed each one, and that
+checkpoint, marked `outside_range`). Absent-payload event lines also
+carry `absence`, either `redacted` or `erased`, saying which ceremony
+destroyed the payload.
+
+`redactions.json` remains, as an index and never as authority: an index
+is written by the exporter and cannot be checked against anything, so it
+informs a reader and never decides a verdict. An absence is accepted
+only against a declaration whose entry hash recomputes, whose payload
+matches its payload hash, whose action matches the kind of absence,
+whose targets name that exact stream and sequence, and which was sealed
+in a checkpoint whose signature verifies inside its key's trusted
+window. A declaration in the same stream must also come after the event
+it destroyed. Nothing about the hashing mathematics changes.
+
 ## Bundle contents
 
 A bundle is a zip archive (or the equivalent extracted directory):
@@ -79,6 +100,8 @@ A bundle is a zip archive (or the equivalent extracted directory):
 | `links.json` | Document ↔ event links with their ledgered fact sequences (optional) | 1.4 |
 | `witness.json` | Reserved: cross-tenant witness proofs (specified, not yet emitted) | 1.4 |
 | `attestations.json` | Reserved: continuous-verification attestation chain (specified, not yet emitted) | 1.4 |
+| `declarations.ndjson` | The declarations covering every absent payload in the range, as full entry records | 1.5 |
+| `declaration_proofs.json` | Audit paths and sealing checkpoints for declarations outside the range | 1.5 |
 | `README.txt` | Plain-language instructions for the bundle holder | 1 |
 | `verify.php` | This verifier, copied into every bundle | 1 |
 

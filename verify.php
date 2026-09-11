@@ -83,20 +83,89 @@ declare(strict_types=1);
  * canonicalisation logic intentionally duplicates the application's
  * implementation — its independence is the point.
  *
+ * Results. The report separates what was proved from who proved it,
+ * because they answer different questions:
+ *
+ *   Content integrity  the chain, payload hashes, Merkle roots and
+ *                      checkpoint signatures — the bundle is internally
+ *                      consistent and nothing in it has been altered
+ *   Signing identity   the checkpoints were signed by a key this verifier
+ *                      trusts, sealed inside that key's window
+ *   Timestamps         the RFC 3161 anchors, against trust roots this
+ *                      verifier carries rather than roots the bundle
+ *                      supplied
+ *   Scope              the range and completeness the manifest claims
+ *   Redactions         every absent payload is named by an authenticated
+ *                      declaration
+ *
+ * The distinction matters because a bundle can be perfectly self-
+ * consistent and still not be Sigilbase's: anyone can produce a chain and
+ * sign it with a key of their own. Internal consistency is a question
+ * about the bundle; identity is a question about the world outside it,
+ * and only something the verifier already knew can answer that.
+ *
  * Exit codes:
- *   0 = PASS — every check succeeded
- *   1 = FAIL — the bundle does not verify. This includes bundles with
- *       required files missing: evidence with pieces deleted must never pass.
- *   2 = usage or format error — bad arguments, a path that does not exist,
- *       or a manifest whose format id this verifier does not know; nothing
- *       was verified either way.
+ *   0 = PASS — every result that was checked holds, signing identity
+ *       included
+ *   1 = FAIL — content integrity, redactions or a key window failed. This
+ *       includes bundles with required files missing: evidence with pieces
+ *       deleted must never pass.
+ *   2 = ERROR — usage, an unreadable bundle, or a manifest whose format id
+ *       this verifier does not know; nothing was verified either way.
+ *   3 = UNCONFIRMED — every integrity result holds, but signing identity
+ *       or timestamps could not be confirmed: the maths is sound and the
+ *       provenance is not established. Not a pass, and not evidence of
+ *       tampering.
  *
  * Versioning: semver, distinct from the bundle format version. See
  * FORMAT.md (alongside this file) for the format specification and the
  * verifier/format compatibility table. This file makes no network calls
  * of any kind.
  */
-const VERIFIER_VERSION = '1.4.2';
+const VERIFIER_VERSION = '1.5.0';
+
+/**
+ * The signing keys this verifier trusts, compiled into the release from
+ * keys/sigilbase.json by tools/compile-keys.php. A test asserts the two
+ * agree, so the constant cannot drift from the file the release publishes.
+ *
+ * A bundle carries its own signing keys in the manifest, which is how the
+ * maths gets done; it cannot establish whose keys they are. That is what
+ * this set is for. Matching is by public key bytes — the id below is a
+ * fingerprint anyone can recompute (the first 16 hex of the sha256 of the
+ * raw public key), not a database identifier you would have to take our
+ * word for.
+ *
+ * --keys <file> replaces this set entirely: for a private deployment, a
+ * test key, or anyone who would rather fetch the keys themselves from
+ * https://app.sigilbase.io/api/v1/keys and compare.
+ */
+const TRUSTED_SIGNING_KEYS = [
+    [
+        'key_id' => '120a14018fa6a5f3',
+        'public_key' => '4544f991233b0f481d4a09a867de8ebc55acff4528decceb01d126a9bfe7d521',
+        'algorithm' => 'ed25519',
+        'created_at' => '2026-07-15T19:02:41.657979Z',
+        'retired_at' => null,
+    ],
+];
+
+/**
+ * Timestamp-authority trust roots, compiled the same way from
+ * keys/tsa-roots.pem.
+ *
+ * An anchor proves when a checkpoint existed only if the authority that
+ * signed it is one you trust. A bundle also carries roots of its own
+ * (anchors[].ca_pem), and chaining to those shows the bundle is
+ * self-consistent — a bundle can carry any root it likes, including one
+ * it generated. They are still used, and an anchor that validates only
+ * against them makes the timestamps result unconfirmed rather than
+ * passing.
+ *
+ * Empty until the anchoring provider's roots are pinned in a release;
+ * --tsa-roots <file> supplies them meanwhile.
+ */
+const TRUSTED_TSA_ROOTS = '';
 
 error_reporting(E_ALL);
 
@@ -110,6 +179,45 @@ $printHashes = false;   // --print-hashes: report verifier + bundle SHA-256s
 $failures = [];         // every FAIL line, verbatim
 $notes = [];            // every NOTE line, verbatim
 $bundleHashes = [];     // path => sha256 of each bundle FILE argument (dirs are null)
+
+const EXIT_PASS = 0;
+const EXIT_FAIL = 1;
+const EXIT_ERROR = 2;
+const EXIT_UNCONFIRMED = 3;
+
+const RESULT_CONTENT = 'content_integrity';
+const RESULT_IDENTITY = 'signing_identity';
+const RESULT_TIMESTAMPS = 'timestamps';
+const RESULT_SCOPE = 'scope';
+const RESULT_REDACTIONS = 'redactions';
+
+/**
+ * The five results, each pass / fail / unconfirmed / not_checked.
+ *
+ * Everything starts as a pass and is only ever demoted, and a demotion
+ * never reverses: one failed check is enough, and a later good check does
+ * not undo it.
+ *
+ * @var array<string, string>
+ */
+$results = [
+    RESULT_CONTENT => 'pass',
+    RESULT_IDENTITY => 'pass',
+    RESULT_TIMESTAMPS => 'pass',
+    RESULT_SCOPE => 'pass',
+    RESULT_REDACTIONS => 'pass',
+];
+
+/** Where each key used came from: the built-in set, --keys, or the bundle alone. */
+$keySources = [];
+
+/** The signing keys trusted for this run; --keys replaces it wholesale. */
+$trustedSet = TRUSTED_SIGNING_KEYS;
+$trustedSetSource = 'built-in trusted set';
+
+/** Timestamp trust roots for this run; --tsa-roots replaces them. */
+$trustedTsaRoots = TRUSTED_TSA_ROOTS;
+$trustedTsaRootsSource = 'built-in trusted set';
 
 /**
  * All human-readable progress goes through here so --quiet and --json can
@@ -125,19 +233,164 @@ function out(string $text): void
 }
 
 /**
- * Emit the final verdict in whichever mode was requested, then exit 0 or 1.
+ * Demote one result. Ordered worst-last: nothing raises a result, so the
+ * order of checks cannot change the verdict.
+ */
+function demote(string $result, string $state): void
+{
+    global $results;
+
+    $rank = ['pass' => 0, 'not_checked' => 1, 'unconfirmed' => 2, 'fail' => 3];
+
+    if (($rank[$state] ?? 0) > ($rank[$results[$result]] ?? 0)) {
+        $results[$result] = $state;
+    }
+}
+
+/**
+ * The exit code the five results add up to.
+ *
+ * A failure anywhere is a failure. Otherwise anything unconfirmed - the
+ * signing identity, the timestamps - means the maths held but the
+ * provenance did not follow, which is neither a pass nor evidence of
+ * tampering and needs its own answer.
+ */
+function verdict_code(): int
+{
+    global $results;
+
+    if (in_array('fail', $results, true)) {
+        return EXIT_FAIL;
+    }
+
+    return in_array('unconfirmed', $results, true) ? EXIT_UNCONFIRMED : EXIT_PASS;
+}
+
+function verdict_word(int $code): string
+{
+    return match ($code) {
+        EXIT_PASS => 'PASS',
+        EXIT_FAIL => 'FAIL',
+        EXIT_UNCONFIRMED => 'UNCONFIRMED',
+        default => 'ERROR',
+    };
+}
+
+/**
+ * A key's fingerprint: the first 16 hex of the sha256 of its raw public
+ * key bytes. Anyone can recompute it from the key itself, which is the
+ * point - it identifies a key without anyone having to be believed.
+ */
+function key_fingerprint(string $publicKeyHex): string
+{
+    $raw = @hex2bin($publicKeyHex);
+
+    return $raw === false ? 'unreadable' : substr(hash('sha256', $raw), 0, 16);
+}
+
+/**
+ * The trusted entry for a public key, or null when this verifier does not
+ * vouch for it.
+ *
+ * Matched on the key bytes, never on a name or an id the bundle supplies:
+ * the whole question is whether the bytes that signed the checkpoint are
+ * bytes we already trusted, and anything the bundle says about itself is
+ * beside the point.
+ *
+ * @return array{created_at: string|null, retired_at: string|null}|null
+ */
+function trusted_key_for(string $publicKeyHex): ?array
+{
+    global $trustedSet;
+
+    foreach ($trustedSet as $entry) {
+        if (! is_array($entry) || ! isset($entry['public_key']) || ! is_string($entry['public_key'])) {
+            continue;
+        }
+
+        if (hash_equals(strtolower($entry['public_key']), strtolower($publicKeyHex))) {
+            return [
+                'created_at' => isset($entry['created_at']) && is_string($entry['created_at']) ? $entry['created_at'] : null,
+                'retired_at' => isset($entry['retired_at']) && is_string($entry['retired_at']) ? $entry['retired_at'] : null,
+            ];
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Load a trusted key set from a file in the shape of the
+ * /api/v1/keys response, for --keys.
+ *
+ * @return list<array<string, mixed>>
+ */
+function load_key_file(string $path): array
+{
+    if (! is_file($path)) {
+        fail_hard("--keys file [{$path}] does not exist", EXIT_ERROR);
+    }
+
+    $decoded = json_decode((string) file_get_contents($path), true);
+    $keys = is_array($decoded) ? ($decoded['keys'] ?? null) : null;
+
+    if (! is_array($keys) || $keys === []) {
+        fail_hard("--keys file [{$path}] has no \"keys\" list", EXIT_ERROR);
+    }
+
+    $loaded = [];
+
+    foreach ($keys as $key) {
+        if (! is_array($key) || ! isset($key['public_key']) || ! is_string($key['public_key'])) {
+            fail_hard("--keys file [{$path}] contains an entry without a public_key", EXIT_ERROR);
+        }
+
+        $loaded[] = $key;
+    }
+
+    return $loaded;
+}
+
+/**
+ * Emit the final verdict in whichever mode was requested, then exit.
  * Human-readable verdict lines are printed by the caller beforehand (they
- * differ per mode); this handles --print-hashes and --json uniformly.
+ * differ per mode); this handles the results table, --print-hashes and
+ * --json uniformly.
  *
  * @param  array<string, mixed>  $document  mode-specific fields for --json
  */
-function conclude(bool $pass, array $document): never
+function conclude(int $code, array $document): never
 {
-    global $failures, $notes, $jsonMode, $quiet, $printHashes, $bundleHashes;
+    global $failures, $notes, $jsonMode, $quiet, $printHashes, $bundleHashes, $results, $keySources;
+
+    $labels = [
+        RESULT_CONTENT => 'Content integrity',
+        RESULT_IDENTITY => 'Signing identity',
+        RESULT_TIMESTAMPS => 'Timestamps',
+        RESULT_SCOPE => 'Scope',
+        RESULT_REDACTIONS => 'Redactions',
+    ];
+
+    out("\n");
+
+    foreach ($labels as $key => $label) {
+        out(sprintf("  %-18s %s\n", $label, strtoupper(str_replace('_', ' ', $results[$key]))));
+    }
+
+    if ($keySources !== []) {
+        out("\nSigning keys used:\n");
+
+        foreach ($keySources as $fingerprint => $source) {
+            out("  {$fingerprint}  trust: {$source}\n");
+        }
+    }
+
+    // Always, not only under --print-hashes: a reader needs to know which
+    // verifier produced this, and comparing it with the release notes is
+    // the whole point of publishing the hash.
+    out("\nVerifier: v".VERIFIER_VERSION.' sha256 '.hash_file('sha256', __FILE__)."\n");
 
     if ($printHashes) {
-        out('Verifier sha256: '.hash_file('sha256', __FILE__)."\n");
-
         foreach ($bundleHashes as $path => $hash) {
             out('Bundle sha256:  '.($hash ?? '(directory, not hashed)')."  {$path}\n");
         }
@@ -146,21 +399,24 @@ function conclude(bool $pass, array $document): never
     if ($jsonMode && ! $quiet) {
         $document = [
             'verifier_version' => VERIFIER_VERSION,
-            'result' => $pass ? 'pass' : 'fail',
+            'verifier_sha256' => hash_file('sha256', __FILE__),
+            'result' => strtolower(verdict_word($code)),
+            'exit_code' => $code,
+            'results' => $results,
+            'signing_keys' => $keySources,
             ...$document,
             'failures' => $failures,
             'notes' => $notes,
         ];
 
         if ($printHashes) {
-            $document['verifier_sha256'] = hash_file('sha256', __FILE__);
             $document['bundle_sha256'] = $bundleHashes;
         }
 
         fwrite(STDOUT, json_encode($document, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)."\n");
     }
 
-    exit($pass ? 0 : 1);
+    exit($code);
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +599,61 @@ function merkle_root(array $leaves): string
         "\x01".merkle_root(array_slice($leaves, 0, $split)).merkle_root(array_slice($leaves, $split)),
         true,
     );
+}
+
+/**
+ * The Certificate Transparency hash stack: append leaves one at a time and
+ * read the RFC 6962 root over everything appended so far, in memory
+ * proportional to log(n) rather than to n.
+ *
+ * The stack holds one perfect subtree root per set bit of the leaf count,
+ * sizes strictly descending, and the root folds them smallest-first.
+ * Because RFC 6962 splits at the largest power of two strictly below n,
+ * that fold is byte-identical to merkle_root() over the same leaves - the
+ * golden vectors and the conformance corpus hold the two together.
+ *
+ * This is what lets a bundle of any size be verified on an ordinary
+ * machine: nothing here ever holds the events.
+ *
+ * @param  list<array{size: int, hash: string}>  $stack
+ */
+function merkle_stack_append(array &$stack, string $leafData): void
+{
+    $stack[] = ['size' => 1, 'hash' => hash('sha256', "\x00".$leafData, true)];
+
+    $top = count($stack) - 1;
+
+    while ($top > 0 && $stack[$top - 1]['size'] === $stack[$top]['size']) {
+        $merged = [
+            'size' => $stack[$top]['size'] * 2,
+            'hash' => hash('sha256', "\x01".$stack[$top - 1]['hash'].$stack[$top]['hash'], true),
+        ];
+
+        array_splice($stack, $top - 1, 2, [$merged]);
+        $top--;
+    }
+}
+
+/**
+ * The root over every leaf appended to the stack so far, as raw bytes.
+ *
+ * @param  list<array{size: int, hash: string}>  $stack
+ */
+function merkle_stack_root(array $stack): string
+{
+    if ($stack === []) {
+        throw new RuntimeException('cannot build a Merkle tree with zero leaves');
+    }
+
+    $hash = null;
+
+    for ($i = count($stack) - 1; $i >= 0; $i--) {
+        $hash = $hash === null
+            ? $stack[$i]['hash']
+            : hash('sha256', "\x01".$stack[$i]['hash'].$hash, true);
+    }
+
+    return (string) $hash;
 }
 
 function merkle_split_point(int $count): int
@@ -1284,12 +1595,32 @@ function fail_hard(string $message, int $code = 1): never
 // Bundle verification
 // ---------------------------------------------------------------------------
 
-function report(string $message): void
+/**
+ * A failed check, against the result it belongs to. Content integrity by
+ * default: it is the largest category and the one a caller that forgets
+ * to say should land in, because over-reporting a failure as an integrity
+ * problem is the safe direction.
+ */
+function report(string $message, string $result = RESULT_CONTENT): void
 {
     global $failures;
 
     $failures[] = $message;
+    demote($result, 'fail');
     out("  FAIL {$message}\n");
+}
+
+/**
+ * A check that could not be completed, as distinct from one that failed.
+ * The maths held; something outside the bundle was missing.
+ */
+function unconfirmed(string $message, string $result): void
+{
+    global $notes;
+
+    $notes[] = $message;
+    demote($result, 'unconfirmed');
+    out("  UNCONFIRMED {$message}\n");
 }
 
 function note(string $message): void
@@ -1366,14 +1697,574 @@ function signing_key_window_problems(array $key, string $sealedAtValue): array
 }
 
 /**
+ * Does a declaration's targets block name this event?
+ *
+ * Targets are runs - [[2,5],[9,9]] - so a declaration covering millions of
+ * events is still a short payload. A run is never expanded here: the
+ * question is whether one sequence falls inside one of them.
+ */
+function declaration_covers(mixed $payload, string $streamId, int $sequence): bool
+{
+    $targets = is_object($payload) ? ($payload->targets ?? null) : null;
+
+    if (! is_array($targets)) {
+        return false;
+    }
+
+    foreach ($targets as $target) {
+        if (! is_object($target) || ($target->stream ?? null) !== $streamId || ! is_array($target->runs ?? null)) {
+            continue;
+        }
+
+        foreach ($target->runs as $run) {
+            if (! is_array($run) || count($run) !== 2 || ! is_int($run[0]) || ! is_int($run[1])) {
+                continue;
+            }
+
+            if ($sequence >= $run[0] && $sequence <= $run[1]) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Recompute one declaration's own hashes: its payload against its
+ * payload_hash, and its entry hash against all of its fields.
+ *
+ * @return list<string> the problems found, empty when the record is sound
+ */
+function declaration_self_problems(stdClass $record): array
+{
+    $problems = [];
+    $label = 'sequence '.((string) ($record->seq ?? '?'));
+
+    try {
+        $payloadHash = hash('sha256', canonical_encode($record->payload ?? null));
+
+        if (! hash_equals(strtolower((string) ($record->payload_hash ?? '')), $payloadHash)) {
+            $problems[] = "{$label}: payload_hash does not match the declaration's own payload";
+        }
+    } catch (RuntimeException $exception) {
+        $problems[] = "{$label}: payload cannot be canonicalised ({$exception->getMessage()})";
+    }
+
+    // Exactly the preimage the events walk recomputes, including the
+    // stream the declaration belongs to - which for a declaration is its
+    // own stream, not the bundle's, since erasures and archived streams'
+    // redactions live in the tenant's system stream.
+    $preimage = canonical_encode((object) [
+        'v' => 1,
+        'stream' => $record->stream ?? null,
+        'seq' => $record->seq ?? null,
+        'occurred_at' => $record->occurred_at ?? null,
+        'received_at' => $record->received_at ?? null,
+        'actor' => $record->actor ?? null,
+        'action' => $record->action ?? null,
+        'resource' => $record->resource ?? null,
+        'payload_hash' => $record->payload_hash ?? null,
+        'prev' => $record->prev_hash ?? null,
+    ]);
+
+    if (! hash_equals(strtolower((string) ($record->entry_hash ?? '')), hash('sha256', $preimage))) {
+        $problems[] = "{$label}: entry_hash does not recompute from the declaration's own fields";
+    }
+
+    return $problems;
+}
+
+/**
+ * The redaction rule (format 1.5).
+ *
+ * An absent payload is accepted only against a declaration the verifier
+ * can authenticate and that names this very event. redactions.json is an
+ * index the exporter wrote; an index cannot be checked against anything,
+ * so it informs a reader and never decides a verdict. What decides is the
+ * declaration the ledger actually carries.
+ *
+ * Every condition below must hold, or the absence fails:
+ *
+ *   1. the declaration's entry hash recomputes from its own fields
+ *   2. its payload matches its payload_hash
+ *   3. its action matches the kind of absence, and a supplementary
+ *      declaration counts only beside its authenticated original
+ *   4. its targets name this stream and this sequence
+ *   5. it is sealed - inside the range, by the checkpoints already
+ *      verified; outside it, by an inclusion proof to a checkpoint whose
+ *      signature verifies under a trusted key, inside that key's window
+ *   6. if it sits in the same stream as the event, it comes after it
+ *
+ * @param  array<int, true>  $absentSequences
+ * @param  array<int, string>  $entryHashBySequence
+ */
+function check_declarations(
+    string $dir,
+    string $format,
+    string $streamId,
+    int $rangeFrom,
+    int $rangeTo,
+    array $absentSequences,
+    array $entryHashBySequence,
+    array $absenceKinds,
+): void {
+    global $trustedSetSource;
+
+    $count = count($absentSequences);
+
+    out("Checking declarations for {$count} absent payload(s)...\n");
+
+    // A bundle older than 1.5 carries no declarations at all, so an absent
+    // payload in one cannot be checked against anything. Saying so plainly
+    // matters: the bundle is not necessarily wrong, it is unverifiable,
+    // and the fix is to export it again.
+    if ($format !== 'sigilbase-evidence/1.5') {
+        report(
+            "this bundle is {$format} and carries {$count} absent payload(s). Formats before "
+            .'sigilbase-evidence/1.5 do not carry the declarations that destroyed them, so the absences cannot be '
+            .'verified. Export the range again from Sigilbase to get a bundle that can be.',
+            RESULT_REDACTIONS,
+        );
+
+        out("\n");
+
+        return;
+    }
+
+    $path = $dir.DIRECTORY_SEPARATOR.'declarations.ndjson';
+
+    if (! is_file($path)) {
+        report(
+            'declarations.ndjson is missing, but payloads in this bundle are absent - '
+            .'evidence with pieces deleted must never pass',
+            RESULT_REDACTIONS,
+        );
+
+        out("\n");
+
+        return;
+    }
+
+    /** @var array<string, stdClass> $authenticated  entry hash => declaration */
+    $authenticated = [];
+
+    foreach (read_lines($path) as $lineNumber => $line) {
+        if (trim($line) === '') {
+            continue;
+        }
+
+        $record = json_decode($line, false);
+
+        if (! $record instanceof stdClass) {
+            report('declarations.ndjson line '.($lineNumber + 1).' is not valid JSON', RESULT_REDACTIONS);
+
+            continue;
+        }
+
+        $problems = declaration_self_problems($record);
+
+        foreach ($problems as $problem) {
+            report("declaration {$problem}", RESULT_REDACTIONS);
+        }
+
+        if ($problems === []) {
+            $authenticated[strtolower((string) $record->entry_hash)] = $record;
+        }
+    }
+
+    // Sealing. A declaration inside the exported range is sealed by the
+    // checkpoints already rebuilt above, and its entry hash must be the
+    // one the chain walked - otherwise the bundle carries two different
+    // events claiming the same position. One outside the range has no
+    // chain to walk, so it travels with an audit path to its checkpoint.
+    $proofs = load_declaration_proofs($dir);
+
+    foreach ($authenticated as $entryHash => $record) {
+        $inThisStream = ($record->stream ?? null) === $streamId;
+        $sequence = $record->seq ?? null;
+
+        if ($inThisStream && is_int($sequence) && $sequence >= $rangeFrom && $sequence <= $rangeTo) {
+            if (! isset($entryHashBySequence[$sequence]) || ! hash_equals($entryHashBySequence[$sequence], $entryHash)) {
+                report(
+                    "declaration at sequence {$sequence}: its entry hash is not the one events.ndjson carries at that "
+                    .'sequence - the bundle contradicts itself',
+                    RESULT_REDACTIONS,
+                );
+
+                unset($authenticated[$entryHash]);
+            }
+
+            continue;
+        }
+
+        $problem = declaration_proof_problem($proofs, $entryHash, $record);
+
+        if ($problem !== null) {
+            report($problem, RESULT_REDACTIONS);
+            unset($authenticated[$entryHash]);
+        }
+    }
+
+    // Now the rule itself, event by event.
+    foreach (array_keys($absentSequences) as $sequence) {
+        $kind = $absenceKinds[$sequence] ?? 'redacted';
+        $wanted = $kind === 'erased' ? 'pii.subject_erased' : 'payload.redacted';
+        $matched = false;
+
+        foreach ($authenticated as $record) {
+            if (! declaration_covers($record->payload ?? null, $streamId, $sequence)) {
+                continue;
+            }
+
+            $action = $record->action ?? null;
+
+            // A supplement adds targets to a statement the ledger already
+            // made. On its own it is just an assertion, so it counts only
+            // when its original is here and authenticated too.
+            if ($action === 'declaration.supplemented') {
+                $original = $record->payload->declaration->entry_hash ?? null;
+                $originalRecord = is_string($original) ? ($authenticated[strtolower($original)] ?? null) : null;
+
+                if ($originalRecord === null) {
+                    report(
+                        "sequence {$sequence}: a supplementary declaration names this event, but the original "
+                        .'declaration it supplements is not in the bundle - a supplement proves nothing alone',
+                        RESULT_REDACTIONS,
+                    );
+
+                    continue;
+                }
+
+                $action = $originalRecord->action ?? null;
+            }
+
+            if ($action !== $wanted) {
+                continue;
+            }
+
+            // Same stream: the declaration records an act performed on
+            // earlier events, so it cannot precede the event it destroyed.
+            if (($record->stream ?? null) === $streamId && is_int($record->seq ?? null) && $record->seq <= $sequence) {
+                report(
+                    "sequence {$sequence}: the declaration naming it sits at sequence {$record->seq}, at or before the "
+                    .'event itself - a payload cannot be declared destroyed before it existed',
+                    RESULT_REDACTIONS,
+                );
+
+                continue;
+            }
+
+            $matched = true;
+
+            break;
+        }
+
+        if (! $matched) {
+            report(
+                "sequence {$sequence}: the payload is absent and no authenticated {$wanted} declaration in this bundle "
+                .'names it - absence must be declared, never implied',
+                RESULT_REDACTIONS,
+            );
+        }
+    }
+
+    out("\n");
+}
+
+/**
+ * Every cumulative tree size consistency.json refers to, so the events
+ * walk can capture a root at each as it passes rather than slicing an
+ * array of every entry hash afterwards.
+ *
+ * @return list<int>
+ */
+function consistency_tree_sizes(string $dir): array
+{
+    $path = $dir.DIRECTORY_SEPARATOR.'consistency.json';
+
+    if (! is_file($path)) {
+        return [];
+    }
+
+    $document = json_decode((string) file_get_contents($path), false);
+
+    if (! is_object($document)) {
+        return [];
+    }
+
+    $sizes = [];
+
+    foreach ($document->checkpoint_states ?? [] as $state) {
+        if (is_int($state->tree_size ?? null)) {
+            $sizes[] = $state->tree_size;
+        }
+    }
+
+    $proof = $document->proof ?? null;
+
+    if (is_object($proof)) {
+        foreach (['from_tree_size', 'to_tree_size'] as $field) {
+            if (is_int($proof->{$field} ?? null)) {
+                $sizes[] = $proof->{$field};
+            }
+        }
+    }
+
+    return $sizes;
+}
+
+/**
+ * The sequences declarations occupy inside this bundle's own range.
+ *
+ * Read before the events are walked so the walk knows which entry hashes
+ * to keep. Everything else is discarded as it goes, which is what keeps
+ * memory independent of how many events a bundle holds.
+ *
+ * @return array<int, true>
+ */
+function declaration_sequences_in_range(string $dir, string $streamId, int $rangeFrom, int $rangeTo): array
+{
+    $path = $dir.DIRECTORY_SEPARATOR.'declarations.ndjson';
+
+    if (! is_file($path)) {
+        return [];
+    }
+
+    $sequences = [];
+
+    foreach (read_lines($path) as $line) {
+        if (trim($line) === '') {
+            continue;
+        }
+
+        $record = json_decode($line, false);
+
+        if (! $record instanceof stdClass || ($record->stream ?? null) !== $streamId) {
+            continue;
+        }
+
+        $sequence = $record->seq ?? null;
+
+        if (is_int($sequence) && $sequence >= $rangeFrom && $sequence <= $rangeTo) {
+            $sequences[$sequence] = true;
+        }
+    }
+
+    return $sequences;
+}
+
+/**
+ * declaration_proofs.json, indexed by the declaration entry hash it
+ * proves.
+ *
+ * @return array<string, stdClass>
+ */
+function load_declaration_proofs(string $dir): array
+{
+    $path = $dir.DIRECTORY_SEPARATOR.'declaration_proofs.json';
+
+    if (! is_file($path)) {
+        return [];
+    }
+
+    $document = json_decode((string) file_get_contents($path), false);
+    $entries = $document instanceof stdClass && is_array($document->proofs ?? null) ? $document->proofs : [];
+
+    $indexed = [];
+
+    foreach ($entries as $entry) {
+        $entryHash = $entry->declaration->entry_hash ?? null;
+
+        if (is_string($entryHash)) {
+            $indexed[strtolower($entryHash)] = $entry;
+        }
+    }
+
+    return $indexed;
+}
+
+/**
+ * Is this out-of-range declaration sealed? Returns the problem, or null
+ * when the audit path, the checkpoint signature and the key window all
+ * hold.
+ *
+ * @param  array<string, stdClass>  $proofs
+ */
+function declaration_proof_problem(array $proofs, string $entryHash, stdClass $record): ?string
+{
+    $where = 'declaration '.((string) ($record->stream_slug ?? '?')).' sequence '.((string) ($record->seq ?? '?'));
+    $proof = $proofs[$entryHash] ?? null;
+
+    if ($proof === null) {
+        return "{$where}: sits outside this bundle's range and carries no inclusion proof, so nothing here shows it was ever sealed";
+    }
+
+    $checkpoint = $proof->checkpoint ?? null;
+
+    if (! $checkpoint instanceof stdClass) {
+        return "{$where}: its proof carries no checkpoint";
+    }
+
+    // The audit path must rebuild the checkpoint's root from this entry.
+    // Each step names its sibling and which side that sibling sits on,
+    // the same RFC 6962 construction as everywhere else here: leaves are
+    // prefixed 0x00 and interior nodes 0x01.
+    $path = $proof->path ?? null;
+
+    if (! is_array($path)) {
+        return "{$where}: its proof is malformed";
+    }
+
+    $computed = @hex2bin($entryHash);
+
+    if ($computed === false) {
+        return "{$where}: its entry hash is not hex";
+    }
+
+    $computed = hash('sha256', "\x00".$computed, true);
+
+    foreach ($path as $step) {
+        $siblingHex = is_object($step) ? ($step->hash ?? null) : null;
+        $side = is_object($step) ? ($step->side ?? null) : null;
+        $siblingRaw = is_string($siblingHex) ? @hex2bin($siblingHex) : false;
+
+        if ($siblingRaw === false || ! in_array($side, ['left', 'right'], true)) {
+            return "{$where}: its audit path is malformed";
+        }
+
+        $computed = $side === 'left'
+            ? hash('sha256', "\x01".$siblingRaw.$computed, true)
+            : hash('sha256', "\x01".$computed.$siblingRaw, true);
+    }
+
+    if (! hash_equals(strtolower((string) ($checkpoint->root ?? '')), bin2hex($computed))) {
+        return "{$where}: its audit path does not rebuild the checkpoint's Merkle root - the proof does not prove this declaration";
+    }
+
+    // The checkpoint itself: hash, signature, trusted key, key window.
+    $preimage = canonical_encode([
+        'v' => $checkpoint->v ?? 1,
+        'stream' => $checkpoint->stream ?? null,
+        'from' => $checkpoint->from ?? null,
+        'to' => $checkpoint->to ?? null,
+        'root' => $checkpoint->root ?? null,
+        'prev_checkpoint' => $checkpoint->prev_checkpoint ?? null,
+        'created_at' => $checkpoint->created_at ?? null,
+    ]);
+
+    $declaredHash = strtolower((string) ($checkpoint->checkpoint_hash ?? ''));
+
+    if (! hash_equals($declaredHash, hash('sha256', $preimage))) {
+        return "{$where}: its sealing checkpoint's hash does not recompute from its fields";
+    }
+
+    $publicKeyHex = strtolower((string) ($checkpoint->public_key ?? ''));
+    $signature = @hex2bin((string) ($checkpoint->signature ?? ''));
+    $message = @hex2bin($declaredHash);
+    $publicKey = @hex2bin($publicKeyHex);
+
+    $valid = is_string($signature)
+        && is_string($message)
+        && is_string($publicKey)
+        && strlen($signature) === SODIUM_CRYPTO_SIGN_BYTES
+        && strlen($publicKey) === SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES
+        && sodium_crypto_sign_verify_detached($signature, $message, $publicKey);
+
+    if (! $valid) {
+        return "{$where}: its sealing checkpoint's signature does not verify";
+    }
+
+    $trusted = trusted_key_for($publicKeyHex);
+
+    if ($trusted === null) {
+        // Not a redaction failure: the declaration is sealed, just under a
+        // key whose owner this verifier cannot vouch for. The signing
+        // identity result already carries that, once, for the bundle.
+        return null;
+    }
+
+    foreach (signing_key_window_problems($trusted, (string) ($checkpoint->created_at ?? '')) as $problem) {
+        return "{$where}: its sealing checkpoint {$problem}";
+    }
+
+    return null;
+}
+
+/**
+ * Every integer this document names under a key ending in "sequence", so
+ * the SigilSign cross-checks can pull just those events out of the stream
+ * rather than indexing the whole log.
+ *
+ * @param  array<int, true>  $into
+ */
+function collect_referenced_sequences(mixed $node, array &$into): void
+{
+    if (is_array($node)) {
+        foreach ($node as $value) {
+            collect_referenced_sequences($value, $into);
+        }
+
+        return;
+    }
+
+    if (! is_object($node)) {
+        return;
+    }
+
+    foreach (get_object_vars($node) as $key => $value) {
+        if (is_int($value) && str_ends_with($key, 'sequence')) {
+            $into[$value] = true;
+        }
+
+        collect_referenced_sequences($value, $into);
+    }
+}
+
+/**
+ * Read a file line by line without holding it in memory.
+ *
+ * A full-history bundle's events.ndjson runs to gigabytes. Memory here is
+ * bounded by the largest checkpoint window rather than by the size of the
+ * bundle, so who can verify a bundle does not depend on how much evidence
+ * it holds.
+ *
+ * @return Generator<int, string>
+ */
+function read_lines(string $path): Generator
+{
+    $handle = fopen($path, 'rb');
+
+    if ($handle === false) {
+        fail_hard("could not read [{$path}]");
+    }
+
+    try {
+        $number = 0;
+
+        while (($line = fgets($handle)) !== false) {
+            yield $number++ => rtrim($line, "\r\n");
+        }
+    } finally {
+        fclose($handle);
+    }
+}
+
+/**
  * Fully verify one bundle. Prints progress; failures land in the global
  * list AND the returned array.
  *
- * @return array{stream_id: string, range_from: int, range_to: int, event_count: int, checkpoint_count: int, entry_hashes: array<int, string>, failures: list<string>}
+ * @return array{stream_id: string, range_from: int, range_to: int, event_count: int, checkpoint_count: int, redacted_count: int, cumulative_roots: array<int, string>, leaves: list<string>, failures: list<string>}
  */
-function verify_bundle(string $target, bool $skipAnchors): array
+/**
+ * @param  bool  $collectLeaves  keep every entry hash as raw bytes. Only
+ *   --consistency needs them, because generating a consistency proof
+ *   walks the whole tree; ordinary verification never holds the events.
+ * @param  list<int>  $wantedRootSizes  extra cumulative tree sizes to record
+ */
+function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = false, array $wantedRootSizes = []): array
 {
-    global $failures;
+    global $failures, $keySources, $trustedSetSource, $trustedTsaRoots, $trustedTsaRootsSource;
 
     $before = count($failures);
 
@@ -1384,8 +2275,20 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
     $format = $manifest instanceof stdClass ? ($manifest->format ?? null) : null;
 
-    if (! in_array($format, ['sigilbase-evidence/1', 'sigilbase-evidence/1.1', 'sigilbase-evidence/1.2', 'sigilbase-evidence/1.3', 'sigilbase-evidence/1.4'], true)) {
-        fail_hard('manifest.json is missing or has an unknown format (expected sigilbase-evidence/1, /1.1, /1.2, /1.3 or /1.4)', 2);
+    $knownFormats = [
+        'sigilbase-evidence/1',
+        'sigilbase-evidence/1.1',
+        'sigilbase-evidence/1.2',
+        'sigilbase-evidence/1.3',
+        'sigilbase-evidence/1.4',
+        'sigilbase-evidence/1.5',
+    ];
+
+    if (! in_array($format, $knownFormats, true)) {
+        fail_hard(
+            'manifest.json is missing or has an unknown format (expected one of: '.implode(', ', $knownFormats).')',
+            EXIT_ERROR,
+        );
     }
 
     $streamId = $manifest->stream->id ?? null;
@@ -1453,43 +2356,115 @@ function verify_bundle(string $target, bool $skipAnchors): array
         }
     }
 
+    // ---- checkpoints.json, read early --------------------------------------
+    //
+    // The ranges are needed before the events are walked, so each
+    // checkpoint's Merkle root can be rebuilt as its events stream past
+    // rather than from an array of every entry hash held until the end.
+
+    $checkpointDocument = json_decode(read_bundle_file($dir, 'checkpoints.json'), false);
+    $checkpoints = $checkpointDocument->checkpoints ?? null;
+
+    if (! is_array($checkpoints) || $checkpoints === []) {
+        fail_hard('checkpoints.json contains no checkpoints');
+    }
+
+    /** @var list<array{from: int, to: int}> $checkpointRanges  in file order */
+    $checkpointRanges = [];
+
+    foreach ($checkpoints as $checkpoint) {
+        if (is_int($checkpoint->from ?? null) && is_int($checkpoint->to ?? null)) {
+            $checkpointRanges[] = ['from' => $checkpoint->from, 'to' => $checkpoint->to];
+        }
+    }
+
+    // Which entry hashes have to survive the walk: the ones declarations
+    // name, so an in-range declaration can be matched to the event the
+    // chain actually walked. A handful, not a million.
+    $retainSequences = declaration_sequences_in_range($dir, $streamId, $rangeFrom, $rangeTo);
+
+    // The tree sizes anything later asks about: every checkpoint boundary
+    // (the consistency section records a root at each), the end of the
+    // range, and whatever the caller named.
+    $rootSizes = [$rangeTo => true];
+
+    foreach ($checkpointRanges as $range) {
+        $rootSizes[$range['to']] = true;
+    }
+
+    foreach ($wantedRootSizes as $size) {
+        $rootSizes[$size] = true;
+    }
+
+    // consistency.json records a root at particular tree sizes; read now,
+    // so the walk knows which ones to capture as it goes.
+    foreach (consistency_tree_sizes($dir) as $size) {
+        $rootSizes[$size] = true;
+    }
+
     // ---- events.ndjson -----------------------------------------------------
 
     out("Checking events.ndjson (hash chain)...\n");
 
-    $eventLines = preg_split('/\r?\n/', trim(read_bundle_file($dir, 'events.ndjson')));
-    $events = [];
+    // Streamed, one line at a time: nothing below holds more than the
+    // current event, so a bundle's size does not decide who can check it.
+    $eventsPath = $dir.DIRECTORY_SEPARATOR.'events.ndjson';
 
-    foreach ($eventLines as $lineNumber => $line) {
-        if ($line === '') {
-            continue;
-        }
-
-        $event = json_decode($line, false);
-
-        if (! $event instanceof stdClass) {
-            report('events.ndjson line '.($lineNumber + 1).' is not valid JSON');
-
-            continue;
-        }
-
-        $events[] = $event;
+    if (! is_file($eventsPath)) {
+        fail_hard('bundle is missing [events.ndjson]');
     }
 
-    if ($events === []) {
-        fail_hard('events.ndjson contains no events');
-    }
+    $events = (function () use ($eventsPath): Generator {
+        foreach (read_lines($eventsPath) as $lineNumber => $line) {
+            if (trim($line) === '') {
+                continue;
+            }
 
+            $event = json_decode($line, false);
+
+            if (! $event instanceof stdClass) {
+                report('events.ndjson line '.($lineNumber + 1).' is not valid JSON');
+
+                continue;
+            }
+
+            yield $event;
+        }
+    })();
+
+    $eventCount = 0;
     $expectedSequence = $rangeFrom;
 
     // A range starting at sequence 1 must chain from the 32-zero-byte hash;
     // ranges starting later trust the first event's prev and verify onwards.
     $prevHash = $rangeFrom === 1 ? str_repeat('0', 64) : null;
 
+    // Only the entry hashes something later actually needs, never all of
+    // them: a million of them is more memory than PHP's default limit
+    // allows, whatever else is done.
     $entryHashBySequence = [];
     $redactedCount = 0;
+    $absentSequences = [];
+    /** Which kind of destruction each absence was, from the event's own line. */
+    $absenceKinds = [];
+
+    /** @var list<array{size: int, hash: string}> $cumulativeStack */
+    $cumulativeStack = [];
+    /** @var list<array{size: int, hash: string}> $checkpointStack */
+    $checkpointStack = [];
+    /** @var array<int, string> $cumulativeRootAt  tree size => hex root */
+    $cumulativeRootAt = [];
+    /** @var array<int, string> $rebuiltRootFor  checkpoint first sequence => hex root */
+    $rebuiltRootFor = [];
+    /** @var array<int, int> $checkpointLeavesFor  checkpoint first sequence => leaves seen */
+    $checkpointLeavesFor = [];
+    $checkpointLeafCount = 0;
+    $checkpointIndex = 0;
+    /** @var list<string> $leaves  raw entry hashes, only when a caller needs them */
+    $leaves = [];
 
     foreach ($events as $event) {
+        $eventCount++;
         $sequence = $event->seq ?? null;
 
         if (! is_int($sequence)) {
@@ -1505,8 +2480,10 @@ function verify_bundle(string $target, bool $skipAnchors): array
         // Payload hash: recompute from the payload content itself — except
         // for a redacted event, whose content no longer exists. Redaction
         // is only accepted when every signal agrees: payload_state says
-        // "redacted", the payload is null, and redactions.json declares
-        // the sequence. Anything less is a failure — an absent payload is
+        // "redacted", the payload is null, and — from format 1.5 — an
+        // authenticated declaration in the bundle names this very event
+        // (checked below, once the checkpoints that seal declarations have
+        // been verified). Anything less is a failure: an absent payload is
         // never quietly acceptable.
         $payloadState = $event->payload_state ?? 'present';
         $payloadPresent = ($event->payload ?? null) !== null;
@@ -1519,10 +2496,19 @@ function verify_bundle(string $target, bool $skipAnchors): array
                 report("sequence {$sequence}: payload_state says redacted but a payload is present — the bundle contradicts itself");
             } elseif ($payloadState !== 'redacted') {
                 report("sequence {$sequence}: payload is absent but not marked payload_state \"redacted\" — absence must be declared, never implied");
-            } elseif ($declaration === null) {
-                report("sequence {$sequence}: payload is absent without a redactions.json entry — absence must be declared, never implied");
             } else {
+                // Held for the declaration check. redactions.json is an
+                // index, not authority: it says an absence was declared,
+                // and a verifier cannot check an index against anything.
+                $absentSequences[$sequence] = true;
                 $redactedCount++;
+
+                // Which ceremony destroyed it, so the declaration's action
+                // can be held to it. Unknown values read as a redaction,
+                // which is the stricter of the two to satisfy.
+                $absence = $event->absence ?? 'redacted';
+                $absenceKinds[$sequence] = $absence === 'erased' ? 'erased' : 'redacted';
+
                 $redactedAt = is_string($declaration->redacted_at ?? null) ? substr($declaration->redacted_at, 0, 10) : 'an undeclared date';
                 note("sequence {$sequence}: payload redacted {$redactedAt}, hashes preserved, chain verified from the recorded payload_hash");
             }
@@ -1568,15 +2554,82 @@ function verify_bundle(string $target, bool $skipAnchors): array
             report("sequence {$sequence}: entry_hash does not recompute from the stored fields — a field was modified");
         }
 
-        $entryHashBySequence[$sequence] = strtolower((string) ($event->entry_hash ?? ''));
+        $entryHash = strtolower((string) ($event->entry_hash ?? ''));
+
+        if (isset($retainSequences[$sequence])) {
+            $entryHashBySequence[$sequence] = $entryHash;
+        }
+
+        // Close every checkpoint this sequence has passed, before the event
+        // is counted into one. Driven by the sequence rather than by an
+        // exact boundary: a deleted event means the boundary never
+        // arrives, and a tree left open would fold the next checkpoint's
+        // events into this one's root.
+        while ($checkpointIndex < count($checkpointRanges) && $sequence > $checkpointRanges[$checkpointIndex]['to']) {
+            $closingFrom = $checkpointRanges[$checkpointIndex]['from'];
+
+            $rebuiltRootFor[$closingFrom] = $checkpointStack === []
+                ? ''
+                : bin2hex(merkle_stack_root($checkpointStack));
+            $checkpointLeavesFor[$closingFrom] = $checkpointLeafCount;
+
+            $checkpointStack = [];
+            $checkpointLeafCount = 0;
+            $checkpointIndex++;
+        }
+
+        // Both Merkle trees are fed here, as the event goes past, and
+        // neither holds the events: the cumulative tree for the
+        // consistency section, and a per-checkpoint tree that is finalised
+        // and discarded the moment its range ends.
+        $raw = @hex2bin($entryHash);
+
+        if ($raw !== false && strlen($raw) === 32) {
+            merkle_stack_append($cumulativeStack, $raw);
+            merkle_stack_append($checkpointStack, $raw);
+            $checkpointLeafCount++;
+
+            if ($collectLeaves) {
+                $leaves[] = $raw;
+            }
+        }
+
+        // Snapshotted only at the sizes something asks about - the
+        // checkpoint boundaries the consistency section records, the end
+        // of the range, and any size the caller named. A root at every
+        // sequence would be a million strings, which is the problem this
+        // is here to avoid.
+        if ($rangeFrom === 1 && $cumulativeStack !== [] && isset($rootSizes[$sequence])) {
+            $cumulativeRootAt[$sequence] = bin2hex(merkle_stack_root($cumulativeStack));
+        }
+
         $prevHash = $event->entry_hash ?? null;
         $expectedSequence = $sequence + 1;
+    }
+
+    // Close whatever is still open: the last checkpoint, and any the
+    // events never reached.
+    while ($checkpointIndex < count($checkpointRanges)) {
+        $closingFrom = $checkpointRanges[$checkpointIndex]['from'];
+
+        $rebuiltRootFor[$closingFrom] = $checkpointStack === []
+            ? ''
+            : bin2hex(merkle_stack_root($checkpointStack));
+        $checkpointLeavesFor[$closingFrom] = $checkpointLeafCount;
+
+        $checkpointStack = [];
+        $checkpointLeafCount = 0;
+        $checkpointIndex++;
     }
 
     $lastSequence = $expectedSequence - 1;
 
     if ($lastSequence !== $rangeTo) {
         report("events end at sequence {$lastSequence} but the manifest declares {$rangeTo} — trailing events are missing");
+    }
+
+    if ($eventCount === 0) {
+        fail_hard('events.ndjson contains no events');
     }
 
     // ---- checkpoints.json --------------------------------------------------
@@ -1636,9 +2689,41 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
         if (! isset($trustedKeys[$publicKeyHex])) {
             report("checkpoint {$from}..{$to}: signed by a key that is not in the manifest's signing keys");
+        }
+
+        // Signing identity. The signature proves that *a* key signed
+        // this; only the trusted set can say whose. A bundle's own manifest
+        // cannot establish that - anyone can produce a chain, sign it with
+        // a key they made, and list that key in the manifest.
+        $fingerprint = key_fingerprint($publicKeyHex);
+        $trusted = trusted_key_for($publicKeyHex);
+
+        if ($trusted === null) {
+            $keySources[$fingerprint] = 'bundle only';
+
+            unconfirmed(
+                "checkpoint {$from}..{$to}: signed by key {$fingerprint}, which is not in the ".$trustedSetSource
+                .' - the bundle is internally consistent, but nothing here establishes that Sigilbase produced it',
+                RESULT_IDENTITY,
+            );
+
+            // Fall back to the window the manifest states. It is the only
+            // window information available, and a bundle that contradicts
+            // itself is still worth catching.
+            if (isset($trustedKeys[$publicKeyHex])) {
+                foreach (signing_key_window_problems($trustedKeys[$publicKeyHex], (string) ($checkpoint->created_at ?? '')) as $problem) {
+                    report("checkpoint {$from}..{$to}: {$problem}");
+                }
+            }
         } else {
-            foreach (signing_key_window_problems($trustedKeys[$publicKeyHex], (string) ($checkpoint->created_at ?? '')) as $problem) {
-                report("checkpoint {$from}..{$to}: {$problem}");
+            $keySources[$fingerprint] = $trustedSetSource;
+
+            // The trusted set's window wins outright: the manifest's
+            // created_at and retired_at are the exporter's claims about
+            // its own key, and a bundle that could widen its key's window
+            // could seal anything at any time.
+            foreach (signing_key_window_problems($trusted, (string) ($checkpoint->created_at ?? '')) as $problem) {
+                report("checkpoint {$from}..{$to}: {$problem}", RESULT_IDENTITY);
             }
         }
 
@@ -1659,34 +2744,22 @@ function verify_bundle(string $target, bool $skipAnchors): array
         }
 
         // Merkle root: rebuild from the entry hashes of the covered events.
-        $leaves = [];
-        $complete = true;
+        // Rebuilt as the events streamed past, not from an array of every
+        // entry hash: the root is already here, keyed by the checkpoint's
+        // first sequence. The leaf count names the first missing sequence
+        // when the range is short, so the message is as precise as it was
+        // when the whole range sat in memory.
+        $rebuiltRoot = $rebuiltRootFor[$from] ?? '';
+        $received = $checkpointLeavesFor[$from] ?? 0;
 
-        for ($sequence = $from; $sequence <= $to; $sequence++) {
-            if (! isset($entryHashBySequence[$sequence])) {
-                report("checkpoint {$from}..{$to}: event {$sequence} is missing from events.ndjson");
-                $complete = false;
-
-                break;
-            }
-
-            $leaf = hex2bin($entryHashBySequence[$sequence]);
-
-            if ($leaf === false) {
-                $complete = false;
-
-                break;
-            }
-
-            $leaves[] = $leaf;
-        }
-
-        if ($complete && $leaves !== []) {
-            $rebuiltRoot = bin2hex(merkle_root($leaves));
-
-            if (! hash_equals(strtolower((string) ($checkpoint->root ?? '')), $rebuiltRoot)) {
-                report("checkpoint {$from}..{$to}: the Merkle root does not recompute from the events it covers");
-            }
+        if ($received < $to - $from + 1) {
+            // Short: the leaf count names the first sequence that never
+            // arrived. An over-count is an insertion or a duplicate, which
+            // the sequence walk above already reports at the exact event -
+            // saying "missing" about it would name the wrong thing.
+            report("checkpoint {$from}..{$to}: event ".($from + $received).' is missing from events.ndjson');
+        } elseif (! hash_equals(strtolower((string) ($checkpoint->root ?? '')), $rebuiltRoot)) {
+            report("checkpoint {$from}..{$to}: the Merkle root does not recompute from the events it covers");
         }
 
         $checkpointHashes[$declaredHash] = true;
@@ -1697,23 +2770,39 @@ function verify_bundle(string $target, bool $skipAnchors): array
     $lastCovered = $expectedFrom - 1;
 
     if ($lastCovered !== $rangeTo) {
-        report("checkpoints cover up to sequence {$lastCovered} but the manifest declares {$rangeTo}");
+        report("checkpoints cover up to sequence {$lastCovered} but the manifest declares {$rangeTo}", RESULT_SCOPE);
+    }
+
+    // ---- declarations.ndjson / declaration_proofs.json (1.5) ----------------
+
+    if ($absentSequences !== []) {
+        check_declarations($dir, (string) $format, $streamId, $rangeFrom, $rangeTo, $absentSequences, $entryHashBySequence, $absenceKinds);
+    } else {
+        out("No payload in this bundle is absent; nothing to declare.\n\n");
     }
 
     // ---- anchors.json (format 1.1, optional) --------------------------------
 
     $anchorsPath = $dir.DIRECTORY_SEPARATOR.'anchors.json';
 
-    if (is_file($anchorsPath)) {
+    if (! is_file($anchorsPath)) {
+        // No anchors at all: nothing was checked, which is not the same as
+        // checked and sound.
+        demote(RESULT_TIMESTAMPS, 'not_checked');
+    } else {
         $anchorDocument = json_decode((string) file_get_contents($anchorsPath), false);
         $anchors = is_object($anchorDocument) && is_array($anchorDocument->anchors ?? null) ? $anchorDocument->anchors : [];
 
         if ($anchors !== [] && $skipAnchors) {
             out('Skipping '.count($anchors)." RFC 3161 anchor token(s) (--skip-anchors).\n");
-        } elseif ($anchors !== [] && ! extension_loaded('openssl')) {
+            demote(RESULT_TIMESTAMPS, 'not_checked');
+        } elseif ($anchors === []) {
+            demote(RESULT_TIMESTAMPS, 'not_checked');
+        } elseif (! extension_loaded('openssl')) {
             out("Checking anchors.json (RFC 3161 timestamps)...\n");
             note('anchors present, not verified (the openssl extension is unavailable); use --skip-anchors to silence');
-        } elseif ($anchors !== []) {
+            demote(RESULT_TIMESTAMPS, 'not_checked');
+        } else {
             out("Checking anchors.json (RFC 3161 timestamps)...\n");
 
             foreach ($anchors as $index => $anchor) {
@@ -1748,14 +2837,32 @@ function verify_bundle(string $target, bool $skipAnchors): array
                     continue;
                 }
 
-                $caPem = isset($anchor->ca_pem) && is_string($anchor->ca_pem) && $anchor->ca_pem !== '' ? $anchor->ca_pem : null;
+                // Trust roots come from this verifier, never from the
+                // bundle alone. A bundle can carry any root it likes,
+                // including one it generated, so chaining to a
+                // bundle-supplied root shows the exporter is internally
+                // consistent and nothing more.
+                $bundlePem = isset($anchor->ca_pem) && is_string($anchor->ca_pem) && $anchor->ca_pem !== '' ? $anchor->ca_pem : null;
+                $trustedPem = $trustedTsaRoots !== '' ? $trustedTsaRoots : null;
+                $caPem = $trustedPem ?? $bundlePem;
 
                 foreach (anchor_validate($token, (string) hex2bin($checkpointHash), $caPem) as $problem) {
-                    report("{$label}: {$problem}");
+                    report("{$label}: {$problem}", RESULT_TIMESTAMPS);
                 }
 
-                if ($caPem === null) {
-                    note("{$label}: signature and imprint verified; no CA chain was provided, so the TSA identity was not verified");
+                if ($trustedPem === null && $bundlePem !== null) {
+                    unconfirmed(
+                        "{$label}: the token and its imprint verify, and the signer chains only to a root this bundle "
+                        .'supplied - which shows the bundle is self-consistent, not that a timestamp authority you '
+                        .'trust issued it. Pass --tsa-roots with the authority\'s own roots to settle it',
+                        RESULT_TIMESTAMPS,
+                    );
+                } elseif ($caPem === null) {
+                    unconfirmed(
+                        "{$label}: the token and its imprint verify, but no trust roots were available, so the "
+                        .'timestamp authority\'s identity was not established',
+                        RESULT_TIMESTAMPS,
+                    );
                 }
 
                 // Informational qualified-TSA metadata (format 1.3). Reported
@@ -1819,18 +2926,54 @@ function verify_bundle(string $target, bool $skipAnchors): array
     // redacted event's facts cannot be cross-checked and are noted, not
     // failed: redaction is a declared destruction, not a contradiction.
 
+    // A second streaming pass rather than an index of every event: the
+    // point of reading events.ndjson a line at a time is not to hold it.
+    // Only the events these blocks actually reference are kept - those
+    // carrying a signing: resource, and those at a sequence one of the
+    // blocks names.
     $eventBySequence = [];
     $eventsBySigningResource = [];
 
-    foreach ($events as $event) {
-        if (is_int($event->seq ?? null)) {
-            $eventBySequence[$event->seq] = $event;
+    $sigilSignPaths = array_filter(
+        ['documents.json', 'signatures.json', 'links.json'],
+        static fn (string $name): bool => is_file($dir.DIRECTORY_SEPARATOR.$name),
+    );
+
+    if ($sigilSignPaths !== []) {
+        $wantedSequences = [];
+
+        foreach ($sigilSignPaths as $name) {
+            collect_referenced_sequences(
+                json_decode((string) file_get_contents($dir.DIRECTORY_SEPARATOR.$name), false),
+                $wantedSequences,
+            );
         }
 
-        $eventResource = $event->resource ?? null;
+        foreach (read_lines($eventsPath) as $line) {
+            if (trim($line) === '') {
+                continue;
+            }
 
-        if (is_string($eventResource) && str_starts_with($eventResource, 'signing:')) {
-            $eventsBySigningResource[$eventResource][] = $event;
+            $event = json_decode($line, false);
+
+            if (! $event instanceof stdClass) {
+                continue;
+            }
+
+            $eventResource = $event->resource ?? null;
+            $isSigning = is_string($eventResource) && str_starts_with($eventResource, 'signing:');
+
+            if (! $isSigning && ! isset($wantedSequences[$event->seq ?? -1])) {
+                continue;
+            }
+
+            if (is_int($event->seq ?? null)) {
+                $eventBySequence[$event->seq] = $event;
+            }
+
+            if ($isSigning) {
+                $eventsBySigningResource[$eventResource][] = $event;
+            }
         }
     }
 
@@ -2073,22 +3216,14 @@ function verify_bundle(string $target, bool $skipAnchors): array
 
         $consistency = json_decode((string) file_get_contents($consistencyPath), false);
 
-        $cumulativeLeaves = [];
+        // The roots were captured as the events streamed past, at exactly
+        // the sizes this file refers to.
+        $rootAt = static fn (int $size): ?string => $cumulativeRootAt[$size] ?? null;
 
-        for ($sequence = 1; $sequence <= $rangeTo; $sequence++) {
-            $leaf = isset($entryHashBySequence[$sequence]) ? hex2bin($entryHashBySequence[$sequence]) : false;
-
-            if (! is_string($leaf)) {
-                break;
-            }
-
-            $cumulativeLeaves[] = $leaf;
-        }
-
-        if (count($cumulativeLeaves) === $rangeTo && is_object($consistency)) {
+        if ($rootAt($rangeTo) !== null && is_object($consistency)) {
             $declaredRoot = strtolower((string) ($consistency->root ?? ''));
 
-            if (! hash_equals($declaredRoot, bin2hex(merkle_root($cumulativeLeaves)))) {
+            if (! hash_equals($declaredRoot, (string) $rootAt($rangeTo))) {
                 report('consistency.json: the cumulative root does not recompute from the events');
             }
 
@@ -2101,9 +3236,9 @@ function verify_bundle(string $target, bool $skipAnchors): array
                     continue;
                 }
 
-                $stateRoot = bin2hex(merkle_root(array_slice($cumulativeLeaves, 0, $size)));
+                $stateRoot = $rootAt($size);
 
-                if (! hash_equals(strtolower((string) ($state->root ?? '')), $stateRoot)) {
+                if ($stateRoot === null || ! hash_equals(strtolower((string) ($state->root ?? '')), $stateRoot)) {
                     report("consistency.json: the recorded root for tree_size {$size} does not recompute");
                 }
             }
@@ -2124,13 +3259,20 @@ function verify_bundle(string $target, bool $skipAnchors): array
                 $fromSize = (int) ($proof->from_tree_size ?? 0);
                 $toSize = (int) ($proof->to_tree_size ?? 0);
 
-                $valid = $fromSize >= 1 && $toSize === $rangeTo && consistency_verify(
-                    $fromSize,
-                    $toSize,
-                    merkle_root(array_slice($cumulativeLeaves, 0, $fromSize)),
-                    merkle_root($cumulativeLeaves),
-                    $nodes,
-                );
+                $fromRoot = $rootAt($fromSize);
+                $toRoot = $rootAt($rangeTo);
+
+                $valid = $fromSize >= 1
+                    && $toSize === $rangeTo
+                    && $fromRoot !== null
+                    && $toRoot !== null
+                    && consistency_verify(
+                        $fromSize,
+                        $toSize,
+                        (string) hex2bin($fromRoot),
+                        (string) hex2bin($toRoot),
+                        $nodes,
+                    );
 
                 if (! $valid) {
                     report('consistency.json: the recorded consistency proof does not verify');
@@ -2145,10 +3287,16 @@ function verify_bundle(string $target, bool $skipAnchors): array
         'stream_id' => $streamId,
         'range_from' => $rangeFrom,
         'range_to' => $rangeTo,
-        'event_count' => count($events),
+        'event_count' => $eventCount,
         'checkpoint_count' => count($checkpoints),
         'redacted_count' => $redactedCount,
-        'entry_hashes' => $entryHashBySequence,
+        // Cumulative RFC 6962 roots, captured as the events streamed past,
+        // at the sizes something asks about. Not one per event: that would
+        // be the memory this streaming exists to avoid.
+        'cumulative_roots' => $cumulativeRootAt,
+        // Raw entry hashes, only when the caller asked for them, because
+        // generating a consistency proof walks the whole tree.
+        'leaves' => $leaves,
         'failures' => array_slice($failures, $before),
     ];
 }
@@ -2169,6 +3317,9 @@ $skipAnchors = false;
 $consistencyMode = false;
 $recordedRoot = null;
 $recordedSize = null;
+$keysFile = null;
+$tsaRootsFile = null;
+$showHelp = false;
 $targets = [];
 
 for ($i = 0; $i < count($arguments); $i++) {
@@ -2192,16 +3343,75 @@ for ($i = 0; $i < count($arguments); $i++) {
         $recordedSize = (int) ($arguments[++$i] ?? 0);
     } elseif (str_starts_with($argument, '--size=')) {
         $recordedSize = (int) substr($argument, 7);
+    } elseif ($argument === '--keys') {
+        $keysFile = (string) ($arguments[++$i] ?? '');
+    } elseif (str_starts_with($argument, '--keys=')) {
+        $keysFile = substr($argument, 7);
+    } elseif ($argument === '--tsa-roots') {
+        $tsaRootsFile = (string) ($arguments[++$i] ?? '');
+    } elseif (str_starts_with($argument, '--tsa-roots=')) {
+        $tsaRootsFile = substr($argument, 12);
+    } elseif ($argument === '--help' || $argument === '-h') {
+        $showHelp = true;
     } elseif (str_starts_with($argument, '--')) {
-        fail_hard("unknown option [{$argument}]", 2);
+        fail_hard("unknown option [{$argument}]", EXIT_ERROR);
     } else {
         $targets[] = $argument;
     }
 }
 
-$usage = "usage: php verify.php [--skip-anchors] [--json] [--quiet] [--print-hashes] <bundle.zip | extracted-bundle-directory>\n"
-    ."       php verify.php --consistency <old-bundle> <new-bundle>\n"
-    ."       php verify.php --consistency <bundle> --root <hex> --size <n>\n";
+$usage = <<<'USAGE'
+Sigilbase evidence verifier.
+
+usage: php verify.php [options] <bundle.zip | extracted-bundle-directory>
+       php verify.php --consistency <old-bundle> <new-bundle>
+       php verify.php --consistency <bundle> --root <hex> --size <n>
+
+Options:
+  --keys <file>       trust these signing keys instead of the built-in set.
+                      Same shape as https://app.sigilbase.io/api/v1/keys
+  --tsa-roots <file>  trust these timestamp-authority roots (PEM) instead of
+                      the built-in ones
+  --skip-anchors      do not validate the RFC 3161 anchors
+  --json              one machine-readable JSON document on stdout
+  --quiet             no output at all; the exit code is the whole answer
+  --print-hashes      also report the sha256 of each bundle file argument
+  --help              this text
+
+Results reported: content integrity, signing identity, timestamps, scope,
+redactions.
+
+Exit codes:
+  0  PASS         every result that was checked holds
+  1  FAIL         integrity, redactions or a key window failed
+  2  ERROR        usage, unreadable bundle, or an unknown format
+  3  UNCONFIRMED  the maths holds, but the signing identity or the
+                  timestamps could not be confirmed
+
+USAGE;
+
+if ($showHelp) {
+    fwrite(STDOUT, $usage);
+
+    exit(EXIT_PASS);
+}
+
+// --keys and --tsa-roots replace the compiled-in sets wholesale, and say
+// so in the report: "which keys did this run actually trust" must never
+// be something a reader has to guess.
+if ($keysFile !== null) {
+    $trustedSet = load_key_file($keysFile);
+    $trustedSetSource = "--keys {$keysFile}";
+}
+
+if ($tsaRootsFile !== null) {
+    if (! is_file($tsaRootsFile)) {
+        fail_hard("--tsa-roots file [{$tsaRootsFile}] does not exist", EXIT_ERROR);
+    }
+
+    $trustedTsaRoots = (string) file_get_contents($tsaRootsFile);
+    $trustedTsaRootsSource = "--tsa-roots {$tsaRootsFile}";
+}
 
 foreach ($targets as $target) {
     $bundleHashes[$target] = is_file($target) ? hash_file('sha256', $target) : null;
@@ -2215,7 +3425,7 @@ if (! $consistencyMode) {
             fwrite(STDERR, $usage);
         }
 
-        fail_hard('expected exactly one bundle argument', 2);
+        fail_hard('expected exactly one bundle argument', EXIT_ERROR);
     }
 
     out("Bundle: {$targets[0]}\n\n");
@@ -2225,32 +3435,37 @@ if (! $consistencyMode) {
     out("\n");
 
     $consistencyState = null;
+    $code = verdict_code();
 
-    if ($failures === []) {
-        out("PASS: {$result['event_count']} events and {$result['checkpoint_count']} checkpoints verified for stream {$result['stream_id']} ({$result['range_from']}..{$result['range_to']}).\n");
+    if ($code === EXIT_FAIL) {
+        out('FAIL: '.count($failures)." problem(s) found. This bundle does NOT verify.\n");
+    } else {
+        out("{$result['event_count']} events and {$result['checkpoint_count']} checkpoints verified for stream {$result['stream_id']} ({$result['range_from']}..{$result['range_to']}).\n");
         out("No event has been modified, deleted, or reordered, and every checkpoint signature is genuine.\n");
 
         if ($result['redacted_count'] > 0) {
-            out("Redactions: {$result['redacted_count']} payload(s) were redacted by the tenant and are declared in redactions.json; their hashes are preserved and the chain is intact.\n");
+            out("Redactions: {$result['redacted_count']} payload(s) were destroyed by the tenant, each named by an authenticated declaration in this bundle; their hashes are preserved and the chain is intact.\n");
         }
 
-        if ($result['range_from'] === 1) {
-            $leaves = [];
+        if ($code === EXIT_UNCONFIRMED) {
+            out("\nUNCONFIRMED: the maths holds and nothing here has been altered, but this bundle's\n");
+            out("origin is not established - see the results above. It is not evidence of tampering,\n");
+            out("and it is not a pass.\n");
+        } else {
+            out("\nPASS: every result that was checked holds.\n");
+        }
 
-            for ($sequence = 1; $sequence <= $result['range_to']; $sequence++) {
-                $leaves[] = (string) hex2bin($result['entry_hashes'][$sequence]);
-            }
+        $cumulativeRoot = $result['cumulative_roots'][$result['range_to']] ?? null;
 
-            $consistencyState = ['tree_size' => $result['range_to'], 'root' => bin2hex(merkle_root($leaves))];
+        if ($result['range_from'] === 1 && $cumulativeRoot !== null) {
+            $consistencyState = ['tree_size' => $result['range_to'], 'root' => $cumulativeRoot];
 
-            out("Consistency state: tree_size={$consistencyState['tree_size']} root={$consistencyState['root']}\n");
+            out("\nConsistency state: tree_size={$consistencyState['tree_size']} root={$consistencyState['root']}\n");
             out("Record these two values: a future export can prove it extends this one (--consistency).\n");
         }
-    } else {
-        out('FAIL: '.count($failures)." problem(s) found. This bundle does NOT verify.\n");
     }
 
-    conclude($failures === [], [
+    conclude($code, [
         'mode' => 'verify',
         'bundle' => [
             'path' => $targets[0],
@@ -2270,11 +3485,13 @@ if (count($targets) === 2 && $recordedRoot === null && $recordedSize === null) {
     out("Mode:   consistency between two bundles\n\n");
     out("=== Old bundle: {$targets[0]} ===\n\n");
 
-    $old = verify_bundle($targets[0], $skipAnchors);
+    // Generating a consistency proof walks the whole tree, so this mode
+    // asks for the leaves. Ordinary verification never does.
+    $old = verify_bundle($targets[0], $skipAnchors, collectLeaves: true);
 
     out("\n=== New bundle: {$targets[1]} ===\n\n");
 
-    $new = verify_bundle($targets[1], $skipAnchors);
+    $new = verify_bundle($targets[1], $skipAnchors, collectLeaves: true);
 
     out("\nChecking consistency (RFC 6962)...\n");
 
@@ -2293,16 +3510,8 @@ if (count($targets) === 2 && $recordedRoot === null && $recordedSize === null) {
     $consistency = null;
 
     if ($failures === []) {
-        $oldLeaves = [];
-        $newLeaves = [];
-
-        for ($sequence = 1; $sequence <= $old['range_to']; $sequence++) {
-            $oldLeaves[] = (string) hex2bin($old['entry_hashes'][$sequence]);
-        }
-
-        for ($sequence = 1; $sequence <= $new['range_to']; $sequence++) {
-            $newLeaves[] = (string) hex2bin($new['entry_hashes'][$sequence]);
-        }
+        $oldLeaves = $old['leaves'];
+        $newLeaves = $new['leaves'];
 
         $oldRoot = merkle_root($oldLeaves);
         $newRoot = merkle_root($newLeaves);
@@ -2331,14 +3540,16 @@ if (count($targets) === 2 && $recordedRoot === null && $recordedSize === null) {
 
     out("\n");
 
-    if ($failures === []) {
+    $code = verdict_code();
+
+    if ($code === EXIT_FAIL) {
+        out('FAIL: '.count($failures)." problem(s) found. Consistency does NOT hold.\n");
+    } else {
         out("PASS: the new bundle is an append-only extension of the old bundle.\n");
         out("Nothing recorded in the old export was modified, deleted, or reordered in the new one.\n");
-    } else {
-        out('FAIL: '.count($failures)." problem(s) found. Consistency does NOT hold.\n");
     }
 
-    conclude($failures === [], [
+    conclude($code, [
         'mode' => 'consistency-bundles',
         'bundles' => [
             ['path' => $targets[0], 'stream' => $old['stream_id'], 'range' => ['from' => $old['range_from'], 'to' => $old['range_to']]],
@@ -2352,7 +3563,10 @@ if (count($targets) === 1 && is_string($recordedRoot) && is_int($recordedSize)) 
     out("Mode:   consistency against a recorded root\n\n");
     out("Bundle: {$targets[0]}\n\n");
 
-    $bundle = verify_bundle($targets[0], $skipAnchors);
+    // The recorded size is known before verification, so the root at that
+    // size is captured as the events stream past rather than rebuilt from
+    // an array of them afterwards.
+    $bundle = verify_bundle($targets[0], $skipAnchors, wantedRootSizes: [$recordedSize]);
 
     out("\nChecking consistency (RFC 6962)...\n");
 
@@ -2363,13 +3577,7 @@ if (count($targets) === 1 && is_string($recordedRoot) && is_int($recordedSize)) 
     } elseif (strlen($recordedRoot) !== 64 || ! ctype_xdigit($recordedRoot)) {
         report('the recorded root is not a 64-character hex hash');
     } else {
-        $leaves = [];
-
-        for ($sequence = 1; $sequence <= $recordedSize; $sequence++) {
-            $leaves[] = (string) hex2bin($bundle['entry_hashes'][$sequence]);
-        }
-
-        $prefixRoot = bin2hex(merkle_root($leaves));
+        $prefixRoot = $bundle['cumulative_roots'][$recordedSize] ?? '';
 
         if (! hash_equals($recordedRoot, $prefixRoot)) {
             report("this bundle does NOT extend the recorded state: its first {$recordedSize} entries hash to {$prefixRoot}, not the recorded root");
@@ -2380,13 +3588,15 @@ if (count($targets) === 1 && is_string($recordedRoot) && is_int($recordedSize)) 
 
     out("\n");
 
-    if ($failures === []) {
-        out("PASS: this bundle is an append-only extension of the recorded state.\n");
-    } else {
+    $code = verdict_code();
+
+    if ($code === EXIT_FAIL) {
         out('FAIL: '.count($failures)." problem(s) found. Consistency does NOT hold.\n");
+    } else {
+        out("PASS: this bundle is an append-only extension of the recorded state.\n");
     }
 
-    conclude($failures === [], [
+    conclude($code, [
         'mode' => 'consistency-recorded-root',
         'bundle' => [
             'path' => $targets[0],
