@@ -36,7 +36,13 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # The tag object itself, not only the commit it points at: the notes
+      # are the annotated tag's message, and a shallow checkout of a single
+      # ref does not carry it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - run: sha256sum verify.php FORMAT.md > SHA256SUMS
 
@@ -45,4 +51,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" verify.php FORMAT.md SHA256SUMS \
             --title "$GITHUB_REF_NAME" \
-            --notes "$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
+            --notes-from-tag
