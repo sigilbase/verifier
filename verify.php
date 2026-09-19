@@ -122,7 +122,14 @@ declare(strict_types=1);
  * verifier/format compatibility table. This file makes no network calls
  * of any kind.
  */
-const VERIFIER_VERSION = '1.5.0';
+const VERIFIER_VERSION = '1.6.0';
+
+/**
+ * How this implementation names itself in a report, beside its version and
+ * the hash of the file that ran. The Go verifier reports sigilbase-verify;
+ * everything else in the two reports is held equal fixture by fixture.
+ */
+const VERIFIER_NAME = 'verify.php';
 
 /**
  * The signing keys this verifier trusts, compiled into the release from
@@ -165,7 +172,108 @@ const TRUSTED_SIGNING_KEYS = [
  * Empty until the anchoring provider's roots are pinned in a release;
  * --tsa-roots <file> supplies them meanwhile.
  */
-const TRUSTED_TSA_ROOTS = '';
+const TRUSTED_TSA_ROOTS = 'Timestamp-authority trust roots for Sigilbase evidence anchors.
+
+Both verifiers embed this file (tools/compile-keys.php writes it into
+verify.php\'s TRUSTED_TSA_ROOTS; the Go verifier embeds it with go:embed).
+An anchor token whose signer chains to one of these roots proves that the
+named authority attested to the checkpoint at the token\'s genTime. A root
+that appears only inside a bundle or a token never establishes trust.
+
+Provenance, recorded 17 September 2026:
+
+  Free TSA Root CA (www.freetsa.org)
+    fetched from https://freetsa.org/files/cacert.pem
+    SHA-256 A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC
+
+  DFN-Verein Community Root CA 2022
+    fingerprint published at https://doku.tid.dfn.de/doku.php?id=de:dfnpki:dfnpki_root_certs
+    SHA-256 3C:DC:2C:9E:9E:5A:36:CB:58:88:FD:17:96:CB:91:2F:84:62:53:B6:82:C1:B3:20:57:53:20:33:51:0C:7B:B6
+
+Owner confirmation of both fingerprints out of band is a release gate for
+v1.6.0 (decision D3). Rotating or adding a root is a verifier release.
+
+-----BEGIN CERTIFICATE-----
+MIIH/zCCBeegAwIBAgIJAMHphhYNqOmAMA0GCSqGSIb3DQEBDQUAMIGVMREwDwYD
+VQQKEwhGcmVlIFRTQTEQMA4GA1UECxMHUm9vdCBDQTEYMBYGA1UEAxMPd3d3LmZy
+ZWV0c2Eub3JnMSIwIAYJKoZIhvcNAQkBFhNidXNpbGV6YXNAZ21haWwuY29tMRIw
+EAYDVQQHEwlXdWVyemJ1cmcxDzANBgNVBAgTBkJheWVybjELMAkGA1UEBhMCREUw
+HhcNMTYwMzEzMDE1MjEzWhcNNDEwMzA3MDE1MjEzWjCBlTERMA8GA1UEChMIRnJl
+ZSBUU0ExEDAOBgNVBAsTB1Jvb3QgQ0ExGDAWBgNVBAMTD3d3dy5mcmVldHNhLm9y
+ZzEiMCAGCSqGSIb3DQEJARYTYnVzaWxlemFzQGdtYWlsLmNvbTESMBAGA1UEBxMJ
+V3VlcnpidXJnMQ8wDQYDVQQIEwZCYXllcm4xCzAJBgNVBAYTAkRFMIICIjANBgkq
+hkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAtgKODjAy8REQ2WTNqUudAnjhlCrpE6ql
+mQfNppeTmVvZrH4zutn+NwTaHAGpjSGv4/WRpZ1wZ3BRZ5mPUBZyLgq0YrIfQ5Fx
+0s/MRZPzc1r3lKWrMR9sAQx4mN4z11xFEO529L0dFJjPF9MD8Gpd2feWzGyptlel
+b+PqT+++fOa2oY0+NaMM7l/xcNHPOaMz0/2olk0i22hbKeVhvokPCqhFhzsuhKsm
+q4Of/o+t6dI7sx5h0nPMm4gGSRhfq+z6BTRgCrqQG2FOLoVFgt6iIm/BnNffUr7V
+DYd3zZmIwFOj/H3DKHoGik/xK3E82YA2ZulVOFRW/zj4ApjPa5OFbpIkd0pmzxzd
+EcL479hSA9dFiyVmSxPtY5ze1P+BE9bMU1PScpRzw8MHFXxyKqW13Qv7LWw4sbk3
+SciB7GACbQiVGzgkvXG6y85HOuvWNvC5GLSiyP9GlPB0V68tbxz4JVTRdw/Xn/XT
+FNzRBM3cq8lBOAVt/PAX5+uFcv1S9wFE8YjaBfWCP1jdBil+c4e+0tdywT2oJmYB
+BF/kEt1wmGwMmHunNEuQNzh1FtJY54hbUfiWi38mASE7xMtMhfj/C4SvapiDN837
+gYaPfs8x3KZxbX7C3YAsFnJinlwAUss1fdKar8Q/YVs7H/nU4c4Ixxxz4f67fcVq
+M2ITKentbCMCAwEAAaOCAk4wggJKMAwGA1UdEwQFMAMBAf8wDgYDVR0PAQH/BAQD
+AgHGMB0GA1UdDgQWBBT6VQ2MNGZRQ0z357OnbJWveuaklzCBygYDVR0jBIHCMIG/
+gBT6VQ2MNGZRQ0z357OnbJWveuakl6GBm6SBmDCBlTERMA8GA1UEChMIRnJlZSBU
+U0ExEDAOBgNVBAsTB1Jvb3QgQ0ExGDAWBgNVBAMTD3d3dy5mcmVldHNhLm9yZzEi
+MCAGCSqGSIb3DQEJARYTYnVzaWxlemFzQGdtYWlsLmNvbTESMBAGA1UEBxMJV3Vl
+cnpidXJnMQ8wDQYDVQQIEwZCYXllcm4xCzAJBgNVBAYTAkRFggkAwemGFg2o6YAw
+MwYDVR0fBCwwKjAooCagJIYiaHR0cDovL3d3dy5mcmVldHNhLm9yZy9yb290X2Nh
+LmNybDCBzwYDVR0gBIHHMIHEMIHBBgorBgEEAYHyJAEBMIGyMDMGCCsGAQUFBwIB
+FidodHRwOi8vd3d3LmZyZWV0c2Eub3JnL2ZyZWV0c2FfY3BzLmh0bWwwMgYIKwYB
+BQUHAgEWJmh0dHA6Ly93d3cuZnJlZXRzYS5vcmcvZnJlZXRzYV9jcHMucGRmMEcG
+CCsGAQUFBwICMDsaOUZyZWVUU0EgdHJ1c3RlZCB0aW1lc3RhbXBpbmcgU29mdHdh
+cmUgYXMgYSBTZXJ2aWNlIChTYWFTKTA3BggrBgEFBQcBAQQrMCkwJwYIKwYBBQUH
+MAGGG2h0dHA6Ly93d3cuZnJlZXRzYS5vcmc6MjU2MDANBgkqhkiG9w0BAQ0FAAOC
+AgEAaK9+v5OFYu9M6ztYC+L69sw1omdyli89lZAfpWMMh9CRmJhM6KBqM/ipwoLt
+nxyxGsbCPhcQjuTvzm+ylN6VwTMmIlVyVSLKYZcdSjt/eCUN+41K7sD7GVmxZBAF
+ILnBDmTGJmLkrU0KuuIpj8lI/E6Z6NnmuP2+RAQSHsfBQi6sssnXMo4HOW5gtPO7
+gDrUpVXID++1P4XndkoKn7Svw5n0zS9fv1hxBcYIHPPQUze2u30bAQt0n0iIyRLz
+aWuhtpAtd7ffwEbASgzB7E+NGF4tpV37e8KiA2xiGSRqT5ndu28fgpOY87gD3ArZ
+DctZvvTCfHdAS5kEO3gnGGeZEVLDmfEsv8TGJa3AljVa5E40IQDsUXpQLi8G+UC4
+1DWZu8EVT4rnYaCw1VX7ShOR1PNCCvjb8S8tfdudd9zhU3gEB0rxdeTy1tVbNLXW
+99y90xcwr1ZIDUwM/xQ/noO8FRhm0LoPC73Ef+J4ZBdrvWwauF3zJe33d4ibxEcb
+8/pz5WzFkeixYM2nsHhqHsBKw7JPouKNXRnl5IAE1eFmqDyC7G/VT7OF669xM6hb
+Ut5G21JE4cNK6NNucS+fzg1JPX0+3VhsYZjj7D5uljRvQXrJ8iHgr/M6j2oLHvTA
+I2MLdq2qjZFDOCXsxBxJpbmLGBx9ow6ZerlUxzws2AWv2pk=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+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
+gUikjM/huUU=
+-----END CERTIFICATE-----
+';
 
 error_reporting(E_ALL);
 
@@ -398,6 +506,7 @@ function conclude(int $code, array $document): never
 
     if ($jsonMode && ! $quiet) {
         $document = [
+            'verifier_name' => VERIFIER_NAME,
             'verifier_version' => VERIFIER_VERSION,
             'verifier_sha256' => hash_file('sha256', __FILE__),
             'result' => strtolower(verdict_word($code)),
@@ -1579,6 +1688,7 @@ function fail_hard(string $message, int $code = 1): never
 
     if ($jsonMode && ! $quiet) {
         fwrite(STDOUT, json_encode([
+            'verifier_name' => VERIFIER_NAME,
             'verifier_version' => VERIFIER_VERSION,
             'result' => 'error',
             'exit_code' => $code,
@@ -1632,6 +1742,46 @@ function note(string $message): void
 }
 
 /**
+ * A bundle value as text, for the hash comparisons and labels below.
+ *
+ * PHP's (string) cast is kept for scalars; an array or an object becomes ''
+ * rather than 'Array' with a warning or a fatal error. No text an array or
+ * object could produce is a hash, so no verdict changes, and a hostile
+ * bundle can no longer stop the run before it gets one. The Go verifier
+ * applies the same rule (FORMAT.md, "Parsing").
+ */
+function bundle_text(mixed $value): string
+{
+    return is_scalar($value) ? (string) $value : '';
+}
+
+/**
+ * The items a bundle list yields to foreach: an array's values, an
+ * object's property values, and nothing for a scalar. Those are the three
+ * outcomes foreach itself has, minus the warning a scalar would raise onto
+ * the output.
+ *
+ * @return list<mixed>
+ */
+function bundle_items(mixed $value): array
+{
+    if (is_array($value)) {
+        return array_values($value);
+    }
+
+    return is_object($value) ? array_values(get_object_vars($value)) : [];
+}
+
+/**
+ * PHP's (int) cast, with the warning an object would raise left out: an
+ * object casts to 1, as it always has.
+ */
+function bundle_int(mixed $value): int
+{
+    return is_object($value) ? 1 : (int) $value;
+}
+
+/**
  * Parse the one timestamp shape the bundle format uses (RFC 3339, UTC,
  * microseconds); anything else is not a time this verifier will trust.
  */
@@ -1641,7 +1791,14 @@ function parse_rfc3339(mixed $value): ?DateTimeImmutable
         return null;
     }
 
-    return new DateTimeImmutable($value);
+    try {
+        return new DateTimeImmutable($value);
+    } catch (Throwable) {
+        // The shape check lets through values PHP's own date parser refuses
+        // (a thirteenth month, a twenty-fifth hour). An unparseable time is
+        // a time this verifier cannot trust, not a reason to stop the run.
+        return null;
+    }
 }
 
 /**
@@ -1739,12 +1896,12 @@ function declaration_covers(mixed $payload, string $streamId, int $sequence): bo
 function declaration_self_problems(stdClass $record): array
 {
     $problems = [];
-    $label = 'sequence '.((string) ($record->seq ?? '?'));
+    $label = 'sequence '.(bundle_text($record->seq ?? '?'));
 
     try {
         $payloadHash = hash('sha256', canonical_encode($record->payload ?? null));
 
-        if (! hash_equals(strtolower((string) ($record->payload_hash ?? '')), $payloadHash)) {
+        if (! hash_equals(strtolower(bundle_text($record->payload_hash ?? '')), $payloadHash)) {
             $problems[] = "{$label}: payload_hash does not match the declaration's own payload";
         }
     } catch (RuntimeException $exception) {
@@ -1755,21 +1912,25 @@ function declaration_self_problems(stdClass $record): array
     // stream the declaration belongs to - which for a declaration is its
     // own stream, not the bundle's, since erasures and archived streams'
     // redactions live in the tenant's system stream.
-    $preimage = canonical_encode((object) [
-        'v' => 1,
-        'stream' => $record->stream ?? null,
-        'seq' => $record->seq ?? null,
-        'occurred_at' => $record->occurred_at ?? null,
-        'received_at' => $record->received_at ?? null,
-        'actor' => $record->actor ?? null,
-        'action' => $record->action ?? null,
-        'resource' => $record->resource ?? null,
-        'payload_hash' => $record->payload_hash ?? null,
-        'prev' => $record->prev_hash ?? null,
-    ]);
+    try {
+        $preimage = canonical_encode((object) [
+            'v' => 1,
+            'stream' => $record->stream ?? null,
+            'seq' => $record->seq ?? null,
+            'occurred_at' => $record->occurred_at ?? null,
+            'received_at' => $record->received_at ?? null,
+            'actor' => $record->actor ?? null,
+            'action' => $record->action ?? null,
+            'resource' => $record->resource ?? null,
+            'payload_hash' => $record->payload_hash ?? null,
+            'prev' => $record->prev_hash ?? null,
+        ]);
 
-    if (! hash_equals(strtolower((string) ($record->entry_hash ?? '')), hash('sha256', $preimage))) {
-        $problems[] = "{$label}: entry_hash does not recompute from the declaration's own fields";
+        if (! hash_equals(strtolower(bundle_text($record->entry_hash ?? '')), hash('sha256', $preimage))) {
+            $problems[] = "{$label}: entry_hash does not recompute from the declaration's own fields";
+        }
+    } catch (RuntimeException $exception) {
+        $problems[] = "{$label}: the declaration's fields cannot be canonicalised ({$exception->getMessage()}) - its entry hash cannot be recomputed";
     }
 
     return $problems;
@@ -1869,7 +2030,7 @@ function check_declarations(
         }
 
         if ($problems === []) {
-            $authenticated[strtolower((string) $record->entry_hash)] = $record;
+            $authenticated[strtolower(bundle_text($record->entry_hash ?? ''))] = $record;
         }
     }
 
@@ -1995,7 +2156,7 @@ function consistency_tree_sizes(string $dir): array
 
     $sizes = [];
 
-    foreach ($document->checkpoint_states ?? [] as $state) {
+    foreach (bundle_items($document->checkpoint_states ?? null) as $state) {
         if (is_int($state->tree_size ?? null)) {
             $sizes[] = $state->tree_size;
         }
@@ -2093,7 +2254,7 @@ function load_declaration_proofs(string $dir): array
  */
 function declaration_proof_problem(array $proofs, string $entryHash, stdClass $record): ?string
 {
-    $where = 'declaration '.((string) ($record->stream_slug ?? '?')).' sequence '.((string) ($record->seq ?? '?'));
+    $where = 'declaration '.(bundle_text($record->stream_slug ?? '?')).' sequence '.(bundle_text($record->seq ?? '?'));
     $proof = $proofs[$entryHash] ?? null;
 
     if ($proof === null) {
@@ -2138,29 +2299,33 @@ function declaration_proof_problem(array $proofs, string $entryHash, stdClass $r
             : hash('sha256', "\x01".$computed.$siblingRaw, true);
     }
 
-    if (! hash_equals(strtolower((string) ($checkpoint->root ?? '')), bin2hex($computed))) {
+    if (! hash_equals(strtolower(bundle_text($checkpoint->root ?? '')), bin2hex($computed))) {
         return "{$where}: its audit path does not rebuild the checkpoint's Merkle root - the proof does not prove this declaration";
     }
 
     // The checkpoint itself: hash, signature, trusted key, key window.
-    $preimage = canonical_encode([
-        'v' => $checkpoint->v ?? 1,
-        'stream' => $checkpoint->stream ?? null,
-        'from' => $checkpoint->from ?? null,
-        'to' => $checkpoint->to ?? null,
-        'root' => $checkpoint->root ?? null,
-        'prev_checkpoint' => $checkpoint->prev_checkpoint ?? null,
-        'created_at' => $checkpoint->created_at ?? null,
-    ]);
+    try {
+        $preimage = canonical_encode([
+            'v' => $checkpoint->v ?? 1,
+            'stream' => $checkpoint->stream ?? null,
+            'from' => $checkpoint->from ?? null,
+            'to' => $checkpoint->to ?? null,
+            'root' => $checkpoint->root ?? null,
+            'prev_checkpoint' => $checkpoint->prev_checkpoint ?? null,
+            'created_at' => $checkpoint->created_at ?? null,
+        ]);
+    } catch (RuntimeException $exception) {
+        return "{$where}: its sealing checkpoint's fields cannot be canonicalised ({$exception->getMessage()}) - its hash cannot be recomputed";
+    }
 
-    $declaredHash = strtolower((string) ($checkpoint->checkpoint_hash ?? ''));
+    $declaredHash = strtolower(bundle_text($checkpoint->checkpoint_hash ?? ''));
 
     if (! hash_equals($declaredHash, hash('sha256', $preimage))) {
         return "{$where}: its sealing checkpoint's hash does not recompute from its fields";
     }
 
-    $publicKeyHex = strtolower((string) ($checkpoint->public_key ?? ''));
-    $signature = @hex2bin((string) ($checkpoint->signature ?? ''));
+    $publicKeyHex = strtolower(bundle_text($checkpoint->public_key ?? ''));
+    $signature = @hex2bin(bundle_text($checkpoint->signature ?? ''));
     $message = @hex2bin($declaredHash);
     $publicKey = @hex2bin($publicKeyHex);
 
@@ -2184,7 +2349,7 @@ function declaration_proof_problem(array $proofs, string $entryHash, stdClass $r
         return null;
     }
 
-    foreach (signing_key_window_problems($trusted, (string) ($checkpoint->created_at ?? '')) as $problem) {
+    foreach (signing_key_window_problems($trusted, bundle_text($checkpoint->created_at ?? '')) as $problem) {
         return "{$where}: its sealing checkpoint {$problem}";
     }
 
@@ -2303,7 +2468,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
     // (null while active) as the manifest states them.
     $trustedKeys = [];
 
-    foreach ($manifest->signing_keys ?? [] as $key) {
+    foreach (bundle_items($manifest->signing_keys ?? null) as $key) {
         if (isset($key->public_key) && is_string($key->public_key)) {
             $trustedKeys[strtolower($key->public_key)] = [
                 'created_at' => $key->created_at ?? null,
@@ -2521,7 +2686,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 $canonicalPayload = canonical_encode($event->payload ?? null);
                 $payloadHash = hash('sha256', $canonicalPayload);
 
-                if (! hash_equals(strtolower((string) ($event->payload_hash ?? '')), $payloadHash)) {
+                if (! hash_equals(strtolower(bundle_text($event->payload_hash ?? '')), $payloadHash)) {
                     report("sequence {$sequence}: payload_hash does not match the payload content — the payload was modified");
                 }
             } catch (RuntimeException $exception) {
@@ -2535,26 +2700,34 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
         }
 
         // Entry hash: recompute the v1 preimage from the event's own fields.
-        $preimage = canonical_encode((object) [
-            'v' => 1,
-            'stream' => $streamId,
-            'seq' => $sequence,
-            'occurred_at' => $event->occurred_at ?? null,
-            'received_at' => $event->received_at ?? null,
-            'actor' => $event->actor ?? null,
-            'action' => $event->action ?? null,
-            'resource' => $event->resource ?? null,
-            'payload_hash' => $event->payload_hash ?? null,
-            'prev' => $event->prev_hash ?? null,
-        ]);
+        try {
+            $preimage = canonical_encode((object) [
+                'v' => 1,
+                'stream' => $streamId,
+                'seq' => $sequence,
+                'occurred_at' => $event->occurred_at ?? null,
+                'received_at' => $event->received_at ?? null,
+                'actor' => $event->actor ?? null,
+                'action' => $event->action ?? null,
+                'resource' => $event->resource ?? null,
+                'payload_hash' => $event->payload_hash ?? null,
+                'prev' => $event->prev_hash ?? null,
+            ]);
 
-        $recomputed = hash('sha256', $preimage);
+            $recomputed = hash('sha256', $preimage);
+        } catch (RuntimeException $exception) {
+            // A float, or an integer beyond 2^53-1, in a hashed field has no
+            // canonical form, so the entry hash cannot be recomputed. That is
+            // a failure of the event, not a reason to stop the run.
+            report("sequence {$sequence}: the event's fields cannot be canonicalised ({$exception->getMessage()}) - the entry hash cannot be recomputed");
+            $recomputed = null;
+        }
 
-        if (! hash_equals(strtolower((string) ($event->entry_hash ?? '')), $recomputed)) {
+        if ($recomputed !== null && ! hash_equals(strtolower(bundle_text($event->entry_hash ?? '')), $recomputed)) {
             report("sequence {$sequence}: entry_hash does not recompute from the stored fields — a field was modified");
         }
 
-        $entryHash = strtolower((string) ($event->entry_hash ?? ''));
+        $entryHash = strtolower(bundle_text($event->entry_hash ?? ''));
 
         if (isset($retainSequences[$sequence])) {
             $entryHashBySequence[$sequence] = $entryHash;
@@ -2662,20 +2835,26 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
         }
 
         // Checkpoint hash: recompute the v1 preimage.
-        $preimage = canonical_encode((object) [
-            'v' => 1,
-            'stream' => $streamId,
-            'from' => $from,
-            'to' => $to,
-            'root' => $checkpoint->root ?? null,
-            'prev_checkpoint' => $checkpoint->prev_checkpoint ?? null,
-            'created_at' => $checkpoint->created_at ?? null,
-        ]);
+        try {
+            $preimage = canonical_encode((object) [
+                'v' => 1,
+                'stream' => $streamId,
+                'from' => $from,
+                'to' => $to,
+                'root' => $checkpoint->root ?? null,
+                'prev_checkpoint' => $checkpoint->prev_checkpoint ?? null,
+                'created_at' => $checkpoint->created_at ?? null,
+            ]);
 
-        $recomputedHash = hash('sha256', $preimage);
-        $declaredHash = strtolower((string) ($checkpoint->checkpoint_hash ?? ''));
+            $recomputedHash = hash('sha256', $preimage);
+        } catch (RuntimeException $exception) {
+            report("checkpoint {$from}..{$to}: the checkpoint's fields cannot be canonicalised ({$exception->getMessage()}) - the checkpoint hash cannot be recomputed");
+            $recomputedHash = null;
+        }
 
-        if (! hash_equals($declaredHash, $recomputedHash)) {
+        $declaredHash = strtolower(bundle_text($checkpoint->checkpoint_hash ?? ''));
+
+        if ($recomputedHash !== null && ! hash_equals($declaredHash, $recomputedHash)) {
             report("checkpoint {$from}..{$to}: checkpoint_hash does not recompute from its fields — the checkpoint was modified");
         }
 
@@ -2685,7 +2864,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
         }
 
         // Signature: Ed25519 over the raw checkpoint hash, key must be trusted.
-        $publicKeyHex = strtolower((string) ($checkpoint->public_key ?? ''));
+        $publicKeyHex = strtolower(bundle_text($checkpoint->public_key ?? ''));
 
         if (! isset($trustedKeys[$publicKeyHex])) {
             report("checkpoint {$from}..{$to}: signed by a key that is not in the manifest's signing keys");
@@ -2711,7 +2890,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             // window information available, and a bundle that contradicts
             // itself is still worth catching.
             if (isset($trustedKeys[$publicKeyHex])) {
-                foreach (signing_key_window_problems($trustedKeys[$publicKeyHex], (string) ($checkpoint->created_at ?? '')) as $problem) {
+                foreach (signing_key_window_problems($trustedKeys[$publicKeyHex], bundle_text($checkpoint->created_at ?? '')) as $problem) {
                     report("checkpoint {$from}..{$to}: {$problem}");
                 }
             }
@@ -2722,14 +2901,14 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             // created_at and retired_at are the exporter's claims about
             // its own key, and a bundle that could widen its key's window
             // could seal anything at any time.
-            foreach (signing_key_window_problems($trusted, (string) ($checkpoint->created_at ?? '')) as $problem) {
+            foreach (signing_key_window_problems($trusted, bundle_text($checkpoint->created_at ?? '')) as $problem) {
                 report("checkpoint {$from}..{$to}: {$problem}", RESULT_IDENTITY);
             }
         }
 
-        $signature = hex2bin((string) ($checkpoint->signature ?? ''));
-        $message = hex2bin($declaredHash);
-        $publicKey = hex2bin($publicKeyHex);
+        $signature = @hex2bin(bundle_text($checkpoint->signature ?? ''));
+        $message = @hex2bin($declaredHash);
+        $publicKey = @hex2bin($publicKeyHex);
 
         $signatureValid = is_string($signature)
             && is_string($message)
@@ -2758,7 +2937,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             // the sequence walk above already reports at the exact event -
             // saying "missing" about it would name the wrong thing.
             report("checkpoint {$from}..{$to}: event ".($from + $received).' is missing from events.ndjson');
-        } elseif (! hash_equals(strtolower((string) ($checkpoint->root ?? '')), $rebuiltRoot)) {
+        } elseif (! hash_equals(strtolower(bundle_text($checkpoint->root ?? '')), $rebuiltRoot)) {
             report("checkpoint {$from}..{$to}: the Merkle root does not recompute from the events it covers");
         }
 
@@ -2806,8 +2985,8 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             out("Checking anchors.json (RFC 3161 timestamps)...\n");
 
             foreach ($anchors as $index => $anchor) {
-                $label = 'anchor #'.($index + 1).' ('.((string) ($anchor->provider ?? 'unknown')).')';
-                $checkpointHash = strtolower((string) ($anchor->checkpoint_hash ?? ''));
+                $label = 'anchor #'.($index + 1).' ('.(bundle_text($anchor->provider ?? 'unknown')).')';
+                $checkpointHash = strtolower(bundle_text($anchor->checkpoint_hash ?? ''));
 
                 if (! isset($checkpointHashes[$checkpointHash])) {
                     report("{$label}: anchors a checkpoint hash that is not in this bundle");
@@ -2815,7 +2994,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                     continue;
                 }
 
-                $tokenDer = base64_decode((string) ($anchor->token ?? ''), true);
+                $tokenDer = base64_decode(bundle_text($anchor->token ?? ''), true);
 
                 if (! is_string($tokenDer) || $tokenDer === '') {
                     report("{$label}: the token is not valid base64");
@@ -2823,7 +3002,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                     continue;
                 }
 
-                if (! hash_equals(strtolower((string) ($anchor->token_hash ?? '')), hash('sha256', $tokenDer))) {
+                if (! hash_equals(strtolower(bundle_text($anchor->token_hash ?? '')), hash('sha256', $tokenDer))) {
                     report("{$label}: the token does not match its recorded token_hash");
 
                     continue;
@@ -2870,7 +3049,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 // wrote these fields, and a claimed status is not evidence —
                 // only the token's cryptography above is.
                 if (($anchor->qualified ?? null) === true) {
-                    $providerName = is_string($anchor->provider_name ?? null) ? $anchor->provider_name : (string) ($anchor->provider ?? 'unknown');
+                    $providerName = is_string($anchor->provider_name ?? null) ? $anchor->provider_name : bundle_text($anchor->provider ?? 'unknown');
                     $jurisdiction = is_string($anchor->jurisdiction ?? null) ? " ({$anchor->jurisdiction})" : '';
 
                     note("{$label}: the exporter recorded this token as issued by a qualified trust service provider — {$providerName}{$jurisdiction}. Informational: the verdict rests on the cryptographic checks alone");
@@ -2906,7 +3085,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 continue;
             }
 
-            if (! hash_equals(strtolower((string) ($record->sha256 ?? '')), (string) hash_file('sha256', $path))) {
+            if (! hash_equals(strtolower(bundle_text($record->sha256 ?? '')), (string) hash_file('sha256', $path))) {
                 report("{$label}: the file does not match its manifest sha256");
             }
         }
@@ -2963,7 +3142,13 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             $eventResource = $event->resource ?? null;
             $isSigning = is_string($eventResource) && str_starts_with($eventResource, 'signing:');
 
-            if (! $isSigning && ! isset($wantedSequences[$event->seq ?? -1])) {
+            $sequenceKey = $event->seq ?? -1;
+
+            if (is_array($sequenceKey) || is_object($sequenceKey)) {
+                $sequenceKey = -1;
+            }
+
+            if (! $isSigning && ! isset($wantedSequences[$sequenceKey])) {
                 continue;
             }
 
@@ -2995,7 +3180,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
 
                 foreach ((array) ($record->versions ?? []) as $versionRecord) {
                     $sequence = $versionRecord->published_sequence ?? null;
-                    $statedSha = strtolower((string) ($versionRecord->sha256 ?? ''));
+                    $statedSha = strtolower(bundle_text($versionRecord->sha256 ?? ''));
 
                     if (! is_int($sequence)) {
                         report("documents.json: document {$slug} lists a version without an integer published_sequence");
@@ -3023,7 +3208,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                         continue;
                     }
 
-                    $ledgeredSha = strtolower((string) ($publishedEvent->payload->sha256 ?? ''));
+                    $ledgeredSha = strtolower(bundle_text($publishedEvent->payload->sha256 ?? ''));
 
                     if (! hash_equals($ledgeredSha, $statedSha)) {
                         report("documents.json: document {$slug} states sha256 {$statedSha} but its document.published event at sequence {$sequence} carries {$ledgeredSha}");
@@ -3062,7 +3247,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 }
 
                 $label = "signatures.json: signing {$signingId}";
-                $documentSha = strtolower((string) ($record->document->sha256 ?? ''));
+                $documentSha = strtolower(bundle_text($record->document->sha256 ?? ''));
                 $signingEvents = $eventsBySigningResource['signing:'.$signingId] ?? [];
 
                 if ($signingEvents === []) {
@@ -3089,7 +3274,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                     }
 
                     if (($signingEvent->action ?? null) === 'signature.viewed') {
-                        $viewedShaByEmail[$email] = strtolower((string) ($payload->sha256 ?? ''));
+                        $viewedShaByEmail[$email] = strtolower(bundle_text($payload->sha256 ?? ''));
                     }
 
                     if (($signingEvent->action ?? null) === 'signature.signed') {
@@ -3098,7 +3283,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 }
 
                 foreach ($signedByEmail as $email => $payload) {
-                    $signedSha = strtolower((string) ($payload->sha256 ?? ''));
+                    $signedSha = strtolower(bundle_text($payload->sha256 ?? ''));
 
                     // The load-bearing check: the signed hash is the
                     // document's hash, and it is the hash the same signer
@@ -3128,8 +3313,8 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                         continue;
                     }
 
-                    $statedMark = strtolower((string) ($signerRecord->signature_sha256 ?? ''));
-                    $ledgeredMark = strtolower((string) ($payload->signature_sha256 ?? ''));
+                    $statedMark = strtolower(bundle_text($signerRecord->signature_sha256 ?? ''));
+                    $ledgeredMark = strtolower(bundle_text($payload->signature_sha256 ?? ''));
 
                     if ($statedMark !== '' && $ledgeredMark !== '' && ! hash_equals($ledgeredMark, $statedMark)) {
                         report("{$label}: {$email}'s stated signature-mark hash does not match the ledgered event");
@@ -3159,7 +3344,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
 
             foreach ($linkRecords as $index => $linkRecord) {
                 $linkLabel = 'links.json entry #'.($index + 1);
-                $linkSha = strtolower((string) ($linkRecord->sha256 ?? ''));
+                $linkSha = strtolower(bundle_text($linkRecord->sha256 ?? ''));
                 $resolved = true;
 
                 foreach (['linked_sequence' => 'document.linked', 'unlinked_sequence' => 'document.unlinked'] as $field => $expectedAction) {
@@ -3177,7 +3362,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                     $linkEvent = is_int($sequence) ? ($eventBySequence[$sequence] ?? null) : null;
 
                     if ($linkEvent === null || ($linkEvent->action ?? null) !== $expectedAction) {
-                        report("{$linkLabel}: {$field} {$sequence} does not resolve to a {$expectedAction} event in this bundle");
+                        report("{$linkLabel}: {$field} ".bundle_text($sequence)." does not resolve to a {$expectedAction} event in this bundle");
                         $resolved = false;
 
                         continue;
@@ -3189,7 +3374,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                         continue;
                     }
 
-                    $eventSha = strtolower((string) ($linkEvent->payload->sha256 ?? ''));
+                    $eventSha = strtolower(bundle_text($linkEvent->payload->sha256 ?? ''));
 
                     if ($linkSha !== '' && ! hash_equals($eventSha, $linkSha)) {
                         report("{$linkLabel}: states sha256 {$linkSha} but the {$expectedAction} event at sequence {$sequence} carries {$eventSha}");
@@ -3221,13 +3406,13 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
         $rootAt = static fn (int $size): ?string => $cumulativeRootAt[$size] ?? null;
 
         if ($rootAt($rangeTo) !== null && is_object($consistency)) {
-            $declaredRoot = strtolower((string) ($consistency->root ?? ''));
+            $declaredRoot = strtolower(bundle_text($consistency->root ?? ''));
 
             if (! hash_equals($declaredRoot, (string) $rootAt($rangeTo))) {
                 report('consistency.json: the cumulative root does not recompute from the events');
             }
 
-            foreach ($consistency->checkpoint_states ?? [] as $state) {
+            foreach (bundle_items($consistency->checkpoint_states ?? null) as $state) {
                 $size = $state->tree_size ?? null;
 
                 if (! is_int($size) || $size < 1 || $size > $rangeTo) {
@@ -3238,7 +3423,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
 
                 $stateRoot = $rootAt($size);
 
-                if ($stateRoot === null || ! hash_equals(strtolower((string) ($state->root ?? '')), $stateRoot)) {
+                if ($stateRoot === null || ! hash_equals(strtolower(bundle_text($state->root ?? '')), $stateRoot)) {
                     report("consistency.json: the recorded root for tree_size {$size} does not recompute");
                 }
             }
@@ -3249,15 +3434,15 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 $nodes = [];
 
                 foreach ((array) ($proof->nodes ?? []) as $hex) {
-                    $node = is_string($hex) ? hex2bin($hex) : false;
+                    $node = is_string($hex) ? @hex2bin($hex) : false;
 
                     if (is_string($node)) {
                         $nodes[] = $node;
                     }
                 }
 
-                $fromSize = (int) ($proof->from_tree_size ?? 0);
-                $toSize = (int) ($proof->to_tree_size ?? 0);
+                $fromSize = bundle_int($proof->from_tree_size ?? 0);
+                $toSize = bundle_int($proof->to_tree_size ?? 0);
 
                 $fromRoot = $rootAt($fromSize);
                 $toRoot = $rootAt($rangeTo);
