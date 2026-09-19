@@ -27,3 +27,52 @@ jobs:
       - run: composer install --no-interaction --no-progress
 
       - run: vendor/bin/phpunit
+
+      # The compiled trusted sets must equal keys/; exit 0 means up to date.
+      - run: php tools/compile-keys.php
+
+      # The committed consistency fixtures must be what the generator produces.
+      - run: php tools/build-corpus-consistency.php
+
+  differential:
+    runs-on: ubuntu-latest
+    name: Differential (verify.php vs sigilbase-verify)
+    needs: [phpunit]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: verifier
+
+      # The Go implementation lives in its own repository and mirrors this
+      # one's corpus, vectors, keys and schema. Its differential tool runs
+      # both verifiers over every fixture in this checkout's corpus and
+      # fails on any difference in exit code, results or document.
+      - uses: actions/checkout@v4
+        with:
+          repository: sigilbase/verifier-go
+          path: verifier-go
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sodium, zip, openssl
+          coverage: none
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: verifier-go/go.mod
+
+      - run: cd verifier-go && go build -o "$GITHUB_WORKSPACE/sigilbase-verify" ./cmd/sigilbase-verify
+
+      - run: |
+          cd verifier-go
+          go run ./tools/differential -php php -verify-php verify.php \
+            -go "$GITHUB_WORKSPACE/sigilbase-verify" \
+            -corpus ../verifier/corpus/expected.json -dir ../verifier
+
+      # The mirror must be exact: the two repositories release together.
+      - run: |
+          for f in corpus vectors keys/sigilbase.json keys/tsa-roots.pem result.schema.json; do
+            diff -r -q "verifier/$f" "verifier-go/$f"
+          done
+          diff -q verifier/verify.php verifier-go/reference/verify.php

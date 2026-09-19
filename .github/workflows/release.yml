@@ -1,9 +1,12 @@
 name: release
 
-# Every version tag gets a build: the full test matrix must pass, then a
-# GitHub Release is published carrying the exact release artefacts —
-# verify.php, FORMAT.md, and their SHA-256 checksums — so auditors can
-# pin the verifier they run without cloning the repository.
+# Every version tag gets a build: the full test matrix must pass and the
+# Go implementation must agree with verify.php on every corpus fixture,
+# then a GitHub Release is published carrying the exact release artefacts,
+# verify.php, FORMAT.md, result.schema.json and their SHA-256 checksums, so
+# auditors can pin the verifier they run without cloning the repository.
+# The binaries are released from github.com/sigilbase/verifier-go under the
+# same version number.
 on:
   push:
     tags: ['v*']
@@ -32,8 +35,50 @@ jobs:
 
       - run: vendor/bin/phpunit
 
+      - run: php tools/compile-keys.php
+
+      - run: php tools/build-corpus-consistency.php
+
+  differential:
+    runs-on: ubuntu-latest
+    name: Differential gate
+    needs: [release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: verifier
+
+      - uses: actions/checkout@v4
+        with:
+          repository: sigilbase/verifier-go
+          path: verifier-go
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sodium, zip, openssl
+          coverage: none
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: verifier-go/go.mod
+
+      - run: cd verifier-go && go build -o "$GITHUB_WORKSPACE/sigilbase-verify" ./cmd/sigilbase-verify
+
+      - run: |
+          cd verifier-go
+          go run ./tools/differential -php php -verify-php verify.php \
+            -go "$GITHUB_WORKSPACE/sigilbase-verify" \
+            -corpus ../verifier/corpus/expected.json -dir ../verifier
+
+      - run: |
+          for f in corpus vectors keys/sigilbase.json keys/tsa-roots.pem result.schema.json; do
+            diff -r -q "verifier/$f" "verifier-go/$f"
+          done
+          diff -q verifier/verify.php verifier-go/reference/verify.php
+
   publish:
-    needs: release
+    needs: [differential]
     runs-on: ubuntu-latest
     steps:
       # The tag object itself, not only the commit it points at: the notes
@@ -44,11 +89,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - run: sha256sum verify.php FORMAT.md > SHA256SUMS
+      - run: sha256sum verify.php FORMAT.md result.schema.json > SHA256SUMS
 
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" verify.php FORMAT.md SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" verify.php FORMAT.md result.schema.json SHA256SUMS \
             --title "$GITHUB_REF_NAME" \
             --notes-from-tag
