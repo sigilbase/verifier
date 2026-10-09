@@ -89,7 +89,7 @@ A bundle is a zip archive (or the equivalent extracted directory):
 
 | File | Purpose | Since |
 | --- | --- | --- |
-| `manifest.json` | Format id, stream identity, exported range, signing keys | 1 |
+| `manifest.json` | Format id, stream identity (`stream.class` of `standard` or `telemetry` from 1.5.1 exports, informational: a telemetry class prints the telemetry honesty text under the summary), exported range, signing keys | 1 |
 | `events.ndjson` | The events, one canonical JSON object per line | 1 |
 | `checkpoints.json` | The signed checkpoints covering the range | 1 |
 | `anchors.json` | RFC 3161 timestamp tokens over checkpoint hashes | 1.1 |

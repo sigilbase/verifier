@@ -341,6 +341,32 @@ function out(string $text): void
 }
 
 /**
+ * The honesty text for a telemetry-class stream: records exported by a
+ * client (an AI coding agent, an application) over OpenTelemetry, one
+ * event each. Printed under the summary when the manifest names the
+ * class. The wording is binding and identical to the Sigilbase docs, the
+ * stream template and the bundle README; change it in all four or none.
+ */
+function telemetry_honesty_text(): string
+{
+    return implode("\n", [
+        'Telemetry stream',
+        '',
+        'What a telemetry stream proves',
+        '',
+        '- That each record was received by Sigilbase at the stated time, from a holder of the stream\'s telemetry key, and has not been modified, deleted or reordered since.',
+        '- The order in which records were received, and the order the source claimed through its own sequence numbers.',
+        '',
+        'What it does not prove',
+        '',
+        '- That the source emitted every event it could have. Telemetry is produced by a client on the user\'s machine. A client with export disabled, misconfigured or offline produces no records, and the ledger cannot see the gap. Managed settings make this harder to do by accident; they do not make it impossible.',
+        '- That the content of a record is true. Sigilbase stores what the client sent.',
+        '- The source\'s claimed time. Sigilbase vouches for receipt time only, and export is batched, so the two differ by seconds in normal operation.',
+        '',
+    ]);
+}
+
+/**
  * Demote one result. Ordered worst-last: nothing raises a result, so the
  * order of checks cannot change the verdict.
  */
@@ -2457,6 +2483,10 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
     }
 
     $streamId = $manifest->stream->id ?? null;
+    // Informational (format 1.5 bundles may carry it): a telemetry-class
+    // stream gets the honesty text under the summary. Never trusted for
+    // anything the maths decides.
+    $streamClass = $manifest->stream->class ?? null;
     $rangeFrom = $manifest->range->from ?? null;
     $rangeTo = $manifest->range->to ?? null;
 
@@ -3470,6 +3500,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
 
     return [
         'stream_id' => $streamId,
+        'stream_class' => is_string($streamClass) ? $streamClass : null,
         'range_from' => $rangeFrom,
         'range_to' => $rangeTo,
         'event_count' => $eventCount,
@@ -3647,6 +3678,14 @@ if (! $consistencyMode) {
 
             out("\nConsistency state: tree_size={$consistencyState['tree_size']} root={$consistencyState['root']}\n");
             out("Record these two values: a future export can prove it extends this one (--consistency).\n");
+        }
+
+        // A telemetry-class stream (the manifest says so) carries the
+        // honesty text under its summary: what the ledger vouches for about
+        // records a client exported, and what it cannot. Binding wording,
+        // identical to the docs, the stream template and the bundle README.
+        if (($result['stream_class'] ?? null) === 'telemetry') {
+            out("\n".telemetry_honesty_text());
         }
     }
 
