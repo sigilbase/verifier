@@ -22,7 +22,7 @@ bundle format version are distinct:
 | 1.2.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2` | Adds `payload_state` and the redactions manifest; fails undeclared payload absence |
 | 1.3.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3` | Reports qualified-TSA metadata (informational, never part of the verdict); checks Certificates of Evidence against their manifest hashes |
 | 1.4.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3`, `sigilbase-evidence/1.4` | Cross-checks the SigilSign blocks (`documents.json`, `signatures.json`, `links.json`) against the events; a contradiction fails, legal-effect claims never influence the verdict. 1.4.1 holds every issuer in an anchor token's certificate chain to CA rules (see *Anchor token* below); a chain through a non-CA certificate now fails. 1.4.2 holds every checkpoint to its signing key's active window (see *Checkpoint signature* below); a checkpoint dated after its key's `retired_at`, or before its `created_at`, now fails even with a verifying signature |
-| 1.5.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Reports five results (content integrity, signing identity, timestamps, scope, redactions) and four exit codes (0 pass, 1 fail, 2 error, 3 unconfirmed). Carries a trusted signing key set and timestamp trust roots, so a bundle signed with a key the verifier does not know is UNCONFIRMED rather than PASS; `--keys` and `--tsa-roots` replace either set. An absent payload is accepted only against an authenticated declaration in the bundle that names that event, so a bundle below 1.5 carrying an absent payload now fails and must be exported again. Reads `events.ndjson` a line at a time, so bundle size no longer bounds who can verify |
+| 1.5.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Reports five results (content integrity, signing identity, timestamps, scope, redactions) and four exit codes (0 pass, 1 fail, 2 error, 3 unconfirmed). Carries a trusted signing key set and timestamp trust roots, so a bundle signed with a key the verifier does not know is UNCONFIRMED rather than PASS; `--keys` and `--tsa-roots` replace either set. An absent payload is accepted only against an authenticated declaration in the bundle that names that event, so a bundle below 1.5 carrying an absent payload now fails and must be exported again. Reads `events.ndjson` a line at a time, so bundle size no longer bounds who can verify. 1.5.1 prints the telemetry honesty text under the summary when the manifest's `stream.class` is `telemetry` (informational; nothing about the verdict changes) |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -88,7 +88,7 @@ A bundle is a zip archive (or the equivalent extracted directory):
 
 | File | Purpose | Since |
 | --- | --- | --- |
-| `manifest.json` | Format id, stream identity, exported range, signing keys | 1 |
+| `manifest.json` | Format id, stream identity (`stream.class` of `standard` or `telemetry` from 1.5.1 exports, informational), exported range, signing keys | 1 |
 | `events.ndjson` | The events, one canonical JSON object per line | 1 |
 | `checkpoints.json` | The signed checkpoints covering the range | 1 |
 | `anchors.json` | RFC 3161 timestamp tokens over checkpoint hashes | 1.1 |
