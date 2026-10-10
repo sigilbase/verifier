@@ -55,6 +55,61 @@ final class CollectionHistory
     }
 
     /**
+     * The history continued by a backfill that heals gap-1 (FORMAT.md,
+     * "Collection records", rules 3 and 4): the backfill receipt, flagged
+     * and carrying the interval it covers; the heal, naming the gap's
+     * declaration and that receipt; and the supplement that settles the day
+     * the gap had kept gapped, listing the gap as healed.
+     *
+     * @return list<array{action: string, resource: string, payload: object|Closure}>
+     */
+    public static function healed(): array
+    {
+        $covers = (object) ['from' => '2026-07-02T09:00:00.000000Z', 'to' => '2026-07-02T10:00:00.000000Z'];
+
+        return [
+            ...self::history(),
+            ['action' => 'collection.receipt', 'resource' => self::RESOURCE, 'payload' => self::with(self::receipt(4, 6, [7, 7], 7), [
+                'backfill' => true,
+                'covers' => $covers,
+            ])],
+            ['action' => 'stream.gap_healed', 'resource' => self::RESOURCE, 'payload' => static fn (array $built): object => (object) [
+                'heal_version' => 1,
+                'gap_id' => 'gap-1',
+                'stream_key' => 'records',
+                'from' => '2026-07-02T09:00:00.000000Z',
+                'to' => '2026-07-02T10:00:00.000000Z',
+                'reason' => 'connection_paused',
+                'declared' => (object) self::eventOf($built, 'stream.gap'),
+                'backfill_receipt' => (object) self::eventOf($built, 'collection.receipt'),
+                'covers' => $covers,
+                'records_received' => 1,
+                'healed_at' => '2026-07-04T03:00:00.000000Z',
+            ]],
+            ['action' => 'stream.settled', 'resource' => self::RESOURCE, 'payload' => static fn (array $built): object => self::settled($built, '2026-07-02', 'settled', [
+                ['gap_id' => 'gap-1', 'from' => '2026-07-02T09:00:00.000000Z', 'to' => '2026-07-02T10:00:00.000000Z', 'reason' => 'connection_paused', 'healed' => true],
+            ], 1, self::settlementOf($built, '2026-07-02'))],
+        ];
+    }
+
+    /**
+     * The latest event of an action so far, by sequence and entry hash.
+     *
+     * @param  list<object>  $built
+     * @return array{sequence: int, entry_hash: string}
+     */
+    public static function eventOf(array $built, string $action): array
+    {
+        foreach (array_reverse($built) as $event) {
+            if ($event->action === $action) {
+                return ['sequence' => $event->seq, 'entry_hash' => $event->entry_hash];
+            }
+        }
+
+        throw new RuntimeException("no {$action} yet");
+    }
+
+    /**
      * @param  array{0: int, 1: int}  $records
      */
     public static function receipt(int $index, ?int $cursorBefore, array $records, int $cursorAfter): Closure

@@ -159,6 +159,34 @@ final class CollectionRecordsTest extends TestCase
         $this->assertFails($history, 'lists gap [gap-never], which the chain never declared');
     }
 
+    public function testAHealNamingADeclaredGapLetsASupplementSettleTheDay(): void
+    {
+        $run = $this->verify($this->bundle(CollectionHistory::healed()));
+
+        self::assertSame(0, $run['code'], $run['stdout'].$run['stderr']);
+        self::assertStringContainsString('stream records: 4 receipt(s) chained, 1 gap(s) declared, 4 settlement record(s)', $run['stdout']);
+    }
+
+    public function testAHealNamingAGapTheChainNeverDeclaredFails(): void
+    {
+        $history = CollectionHistory::healed();
+        $history[9]['payload'] = CollectionHistory::with($history[9]['payload'], ['gap_id' => 'gap-9']);
+        // The supplement then says what the chain says: gap-1 unhealed, the day still gapped.
+        $history[10]['payload'] = static fn (array $built): object => CollectionHistory::settled($built, '2026-07-02', 'gapped', [
+            ['gap_id' => 'gap-1', 'from' => '2026-07-02T09:00:00.000000Z', 'to' => '2026-07-02T10:00:00.000000Z', 'reason' => 'connection_paused', 'healed' => false],
+        ], 1, CollectionHistory::settlementOf($built, '2026-07-02'));
+
+        $this->assertFails($history, 'heals gap [gap-9], which the chain never declared in a bundle that starts at sequence 1');
+    }
+
+    public function testASupplementStillSayingGappedAfterTheHealFails(): void
+    {
+        $history = CollectionHistory::healed();
+        $history[10]['payload'] = CollectionHistory::with($history[10]['payload'], ['state' => 'gapped']);
+
+        $this->assertFails($history, 'state is gapped but the listed gaps say settled');
+    }
+
     public function testASupplementMustFollowTheSettlementItAddsTo(): void
     {
         $history = CollectionHistory::history();

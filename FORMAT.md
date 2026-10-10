@@ -279,7 +279,7 @@ same way, so removing it silences nothing.
 | `stream.config` | `config_version` (the integer 1), `records_stream` (the slug of the stream holding the records) |
 | `collection.receipt` | `receipt_version` (1), `receipt_index` (integer, from 1), `prev_receipt_hash` (64 hex characters), `cursor_before`, `cursor_after` (any JSON, compared canonically), `page_hash` (64 hex), `record_count` (integer, at least 0), `records` (null, or an object `from_sequence`, `to_sequence`), `duplicates_seen` (integer, at least 0), `method` (string), `collected_by` (`tenant` or `sigilbase`) |
 | `stream.gap` | `gap_version` (1), `gap_id` (string), `from`, `to` (RFC 3339 timestamps), `reason` (string), `declared_after_receipt_hash` (64 hex) |
-| `stream.gap_healed` | `gap_id` (string). Reserved: specified so a verifier knows its place in the chain; not emitted yet |
+| `stream.gap_healed` | `gap_id` (string). The application writes it when a backfill covers a declared gap, with `heal_version` (1), `declared` and `backfill_receipt` (each `sequence`, `entry_hash`), `covers` (`from`, `to`) and `records_received` beside it; this format reads only `gap_id` |
 | `stream.settled` | `settlement_version` (1), `day` (`YYYY-MM-DD`), `state` (`settled` or `gapped`), `supplement` (integer, at least 0), `previous_settlement` (null, or an object `sequence`, `entry_hash`), `receipts` (an object `count`, `last_receipt_hash`: 64 hex or null), `gaps` (a list of objects `gap_id`, `from`, `to`, `reason`, `healed`) |
 
 Fields other than these, in these payloads, are ignored. The rules below
