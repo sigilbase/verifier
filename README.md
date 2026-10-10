@@ -178,6 +178,7 @@ recorded `--root <hex> --size <n>` pair), and `--help`.
 | 1.4.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.4` |
 | 1.5.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` |
 | 1.6.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5`, in PHP and Go |
+| 1.7.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.6`, in PHP and Go: adds the collection records of a connection's receipt stream |
 
 Format 1.3 bundles may carry informational qualified-TSA metadata on
 anchors and Certificates of Evidence under `certificates/`. The metadata

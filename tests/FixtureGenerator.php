@@ -217,4 +217,187 @@ final class FixtureGenerator
 
         return $zipPath;
     }
+
+    /**
+     * Write a bundle of the events given, in order, as one stream: each
+     * spec names an action, a resource and a payload, and a payload may be
+     * a closure receiving the events built so far (as objects carrying
+     * seq and entry_hash), which is how a receipt names the one before
+     * it. The format, an optional connection.json, and a later range
+     * start are options, so the collection-record rules of format 1.6 can
+     * be exercised exactly, including the links a bundle that starts
+     * after sequence 1 cannot show.
+     *
+     * @param  list<array{action: string, resource: string|null, payload: object|\Closure, actor?: string}>  $specs
+     * @param  array{format?: string, connection?: array<string, mixed>|null, range_from?: int, per_checkpoint?: int}  $options
+     */
+    public function writeCollectionBundle(string $dir, array $specs, array $options = []): string
+    {
+        if (! is_dir($dir) && ! mkdir($dir, 0755, true)) {
+            throw new RuntimeException("could not create [{$dir}]");
+        }
+
+        $format = $options['format'] ?? 'sigilbase-evidence/1.6';
+        $rangeFrom = $options['range_from'] ?? 1;
+        $perCheckpoint = $options['per_checkpoint'] ?? 2;
+
+        $events = [];
+        $prevHash = self::ZERO_HASH;
+
+        foreach ($specs as $index => $spec) {
+            $sequence = $index + 1;
+            $payload = $spec['payload'] instanceof \Closure ? ($spec['payload'])($events) : $spec['payload'];
+            $payloadHash = hash('sha256', canonical_encode($payload));
+            $occurredAt = sprintf('2026-07-01T09:%02d:%02d.000000Z', intdiv($sequence, 60), $sequence % 60);
+            $receivedAt = sprintf('2026-07-01T09:%02d:%02d.500000Z', intdiv($sequence, 60), $sequence % 60);
+            $actor = $spec['actor'] ?? 'connection:fixture';
+
+            $entryHash = hash('sha256', canonical_encode((object) [
+                'v' => 1,
+                'stream' => $this->streamId,
+                'seq' => $sequence,
+                'occurred_at' => $occurredAt,
+                'received_at' => $receivedAt,
+                'actor' => $actor,
+                'action' => $spec['action'],
+                'resource' => $spec['resource'],
+                'payload_hash' => $payloadHash,
+                'prev' => $prevHash,
+            ]));
+
+            $events[] = (object) [
+                'v' => 1,
+                'seq' => $sequence,
+                'occurred_at' => $occurredAt,
+                'received_at' => $receivedAt,
+                'actor' => $actor,
+                'action' => $spec['action'],
+                'resource' => $spec['resource'],
+                'payload' => $payload,
+                'payload_state' => 'present',
+                'payload_hash' => $payloadHash,
+                'prev_hash' => $prevHash,
+                'entry_hash' => $entryHash,
+            ];
+
+            $prevHash = $entryHash;
+        }
+
+        $eventCount = count($events);
+
+        // Checkpoints over the whole history, then only those inside the
+        // range are exported: a bundle that starts later carries its first
+        // checkpoint's prev_checkpoint as the chain truly had it.
+        $checkpoints = [];
+        $prevCheckpointHash = self::ZERO_HASH;
+
+        foreach (array_chunk($events, $perCheckpoint) as $chunk) {
+            $from = $chunk[0]->seq;
+            $to = $chunk[count($chunk) - 1]->seq;
+
+            $root = bin2hex(merkle_root(array_map(
+                static fn (object $event): string => (string) hex2bin($event->entry_hash),
+                $chunk,
+            )));
+
+            $createdAt = sprintf('2026-07-01T10:%02d:%02d.000000Z', intdiv($to, 60), $to % 60);
+
+            $checkpointHash = hash('sha256', canonical_encode((object) [
+                'v' => 1,
+                'stream' => $this->streamId,
+                'from' => $from,
+                'to' => $to,
+                'root' => $root,
+                'prev_checkpoint' => $prevCheckpointHash,
+                'created_at' => $createdAt,
+            ]));
+
+            $checkpoints[] = (object) [
+                'v' => 1,
+                'stream' => $this->streamId,
+                'from' => $from,
+                'to' => $to,
+                'root' => $root,
+                'prev_checkpoint' => $prevCheckpointHash,
+                'created_at' => $createdAt,
+                'checkpoint_hash' => $checkpointHash,
+                'signature' => bin2hex(sodium_crypto_sign_detached((string) hex2bin($checkpointHash), $this->secretKey)),
+                'public_key' => $this->publicKeyHex,
+            ];
+
+            $prevCheckpointHash = $checkpointHash;
+        }
+
+        if ($rangeFrom > 1 && (($rangeFrom - 1) % $perCheckpoint) !== 0) {
+            throw new RuntimeException('range_from must start a checkpoint');
+        }
+
+        $exportedEvents = array_values(array_filter($events, static fn (object $event): bool => $event->seq >= $rangeFrom));
+        $exportedCheckpoints = array_values(array_filter($checkpoints, static fn (object $checkpoint): bool => $checkpoint->from >= $rangeFrom));
+
+        $manifest = [
+            'format' => $format,
+            'generated_at' => '2026-07-01T11:00:00.000000Z',
+            'stream' => ['id' => $this->streamId, 'slug' => 'sigilbase-connection-fixture', 'name' => 'Connection receipts: Fixture'],
+            'range' => ['from' => $rangeFrom, 'to' => $eventCount],
+            'event_count' => count($exportedEvents),
+            'signing_keys' => [
+                ['public_key' => $this->publicKeyHex, 'created_at' => '2026-01-01T00:00:00.000000Z', 'retired_at' => null],
+            ],
+        ];
+
+        file_put_contents(
+            $dir.DIRECTORY_SEPARATOR.'manifest.json',
+            json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        );
+
+        file_put_contents(
+            $dir.DIRECTORY_SEPARATOR.'events.ndjson',
+            implode("\n", array_map(canonical_encode(...), $exportedEvents))."\n",
+        );
+
+        file_put_contents(
+            $dir.DIRECTORY_SEPARATOR.'checkpoints.json',
+            json_encode(['checkpoints' => $exportedCheckpoints], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        );
+
+        $connectionPath = $dir.DIRECTORY_SEPARATOR.'connection.json';
+
+        if (array_key_exists('connection', $options) && $options['connection'] !== null) {
+            file_put_contents(
+                $connectionPath,
+                json_encode($options['connection'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            );
+        } elseif (is_file($connectionPath)) {
+            unlink($connectionPath);
+        }
+
+        return $dir;
+    }
+
+    /**
+     * Zip an extracted bundle directory with whatever bundle files it
+     * holds (requires ext-zip).
+     */
+    public function zipAll(string $dir, string $zipPath): string
+    {
+        $zip = new ZipArchive;
+
+        if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException("could not create [{$zipPath}]");
+        }
+
+        foreach (['manifest.json', 'events.ndjson', 'checkpoints.json', 'connection.json'] as $file) {
+            if (! is_file($dir.DIRECTORY_SEPARATOR.$file)) {
+                continue;
+            }
+
+            $zip->addFile($dir.DIRECTORY_SEPARATOR.$file, $file);
+            $zip->setMtimeName($file, 315532800);
+        }
+
+        $zip->close();
+
+        return $zipPath;
+    }
 }
