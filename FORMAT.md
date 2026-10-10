@@ -570,6 +570,15 @@ equality against the previous record's raw `entry_hash` or
 `checkpoint_hash` value, case-sensitively; the recomputation of a hash
 compares against the lowercased text. `strtolower` is ASCII-only.
 
+A field is read by name. An absent field reads as null, so an event line
+without `resource` is the same record as one with `resource: null` and
+hashes to the same entry hash; a field the format does not name is never
+read, so a line or a checkpoint carrying one verifies as if it were not
+there. A payload is the exception: it is canonicalised whole, so inside
+one every key and every null counts. The `shape-*` fixtures in the corpus
+pin both rules, and the mutation differential in the Go repository reads
+mutants by them.
+
 ### Timestamps
 
 A timestamp field (`created_at` of a checkpoint or of a trusted key) must
