@@ -8,7 +8,7 @@ the verifier's behaviour are authoritative. Anything not specified is not
 part of the format; consumers must ignore unknown fields and files rather
 than reject them.
 
-The current format identifier is **`sigilbase-evidence/1.5`**.
+The current format identifier is **`sigilbase-evidence/1.6`**.
 
 ## Compatibility
 
@@ -24,6 +24,7 @@ bundle format version are distinct:
 | 1.4.x | `sigilbase-evidence/1`, `sigilbase-evidence/1.1`, `sigilbase-evidence/1.2`, `sigilbase-evidence/1.3`, `sigilbase-evidence/1.4` | Cross-checks the SigilSign blocks (`documents.json`, `signatures.json`, `links.json`) against the events; a contradiction fails, legal-effect claims never influence the verdict. 1.4.1 holds every issuer in an anchor token's certificate chain to CA rules (see *Anchor token* below); a chain through a non-CA certificate now fails. 1.4.2 holds every checkpoint to its signing key's active window (see *Checkpoint signature* below); a checkpoint dated after its key's `retired_at`, or before its `created_at`, now fails even with a verifying signature |
 | 1.5.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Reports five results (content integrity, signing identity, timestamps, scope, redactions) and four exit codes (0 pass, 1 fail, 2 error, 3 unconfirmed). Carries a trusted signing key set and timestamp trust roots, so a bundle signed with a key the verifier does not know is UNCONFIRMED rather than PASS; `--keys` and `--tsa-roots` replace either set. An absent payload is accepted only against an authenticated declaration in the bundle that names that event, so a bundle below 1.5 carrying an absent payload now fails and must be exported again. Reads `events.ndjson` a line at a time, so bundle size no longer bounds who can verify |
 | 1.6.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Adds a second implementation, `sigilbase-verify` (Go), released under the same tag and held to the same exit code and results as `verify.php` on every corpus fixture; specifies parsing, Ed25519 acceptance and the accepted token algorithms (see *Parsing* and *Ed25519 acceptance* below); carries the production timestamp trust roots, so anchored production bundles pass by default and a bundle anchored by an authority the verifier does not carry fails `timestamps` unless `--tsa-roots` names it; reports `verifier_name` in the `--json` document, described by `result.schema.json`; and no longer stops on a hostile field type or date, reporting a failure of that record instead |
+| 1.7.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.6` | Adds the collection records of format 1.6: receipt chains, declared gaps and settlement records in a connection's receipt stream are checked against each other and against `connection.json`, in both implementations |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -83,6 +84,20 @@ in a checkpoint whose signature verifies inside its key's trusted
 window. A declaration in the same stream must also come after the event
 it destroyed. Nothing about the hashing mathematics changes.
 
+Format 1.6 is strictly additive over format 1.5: it names the
+collection records a Sigilbase connection writes into its reserved
+receipt stream (the event actions `stream.config`, `collection.receipt`,
+`stream.gap`, `stream.gap_healed` and `stream.settled`, on a resource
+beginning `connection-stream:`), fixes the payload fields of each, and
+adds the optional informational file `connection.json`, which says
+whether a bundle holds a connection's records or its receipts and names
+the other stream. The records are ordinary events and verify as any
+event does. The receipt chain, the gaps and the settlement records are
+checked against each other as the section *Collection records* below
+specifies; `connection.json`, when present, is cross-checked against them
+and a contradiction fails the bundle. Nothing about the hashing or
+verification mathematics changes.
+
 ## Bundle contents
 
 A bundle is a zip archive (or the equivalent extracted directory):
@@ -103,6 +118,7 @@ A bundle is a zip archive (or the equivalent extracted directory):
 | `attestations.json` | Reserved: continuous-verification attestation chain (specified, not yet emitted) | 1.4 |
 | `declarations.ndjson` | The declarations covering every absent payload in the range, as full entry records | 1.5 |
 | `declaration_proofs.json` | Audit paths and sealing checkpoints for declarations outside the range | 1.5 |
+| `connection.json` | A connection's records bundle names its receipt stream; a receipt stream bundle names the connection and the record streams it covers (optional, informational, cross-checked) | 1.6 |
 | `README.txt` | Plain-language instructions for the bundle holder | 1 |
 | `verify.php` | This verifier, copied into every bundle | 1 |
 
@@ -241,6 +257,97 @@ the golden vectors (`vectors/vectors.json`) are the executable
 specification: every failure mode, every parsing rule and every
 acceptance rule below is pinned by one of them, and both implementations
 are held to them in the release pipeline.
+
+## Collection records
+
+A Sigilbase connection collects a source's records into ordinary streams
+and keeps the record of the collecting in one reserved stream per
+connection, whose slug begins `sigilbase-connection-`. The records are
+ordinary events: their payloads carry the source's bytes as received
+(`raw`, `raw_sha256`) beside the provenance (`source`, `normaliser`), and
+they verify exactly as every other event does. The collecting itself is a
+set of event actions in the receipt stream, one chain per connector
+stream, keyed by the event's `resource`, which is `connection-stream:`
+followed by the stream key. From format 1.6 those actions are part of the
+format, their payload fields are fixed, and the verifier checks them
+whenever a format 1.6 bundle holds any of them. `connection.json` is not
+what triggers the checks: a bundle with the file removed is checked the
+same way, so removing it silences nothing.
+
+| Action | Payload fields the verifier reads |
+| --- | --- |
+| `stream.config` | `config_version` (the integer 1), `records_stream` (the slug of the stream holding the records) |
+| `collection.receipt` | `receipt_version` (1), `receipt_index` (integer, from 1), `prev_receipt_hash` (64 hex characters), `cursor_before`, `cursor_after` (any JSON, compared canonically), `page_hash` (64 hex), `record_count` (integer, at least 0), `records` (null, or an object `from_sequence`, `to_sequence`), `duplicates_seen` (integer, at least 0), `method` (string), `collected_by` (`tenant` or `sigilbase`) |
+| `stream.gap` | `gap_version` (1), `gap_id` (string), `from`, `to` (RFC 3339 timestamps), `reason` (string), `declared_after_receipt_hash` (64 hex) |
+| `stream.gap_healed` | `gap_id` (string). Reserved: specified so a verifier knows its place in the chain; not emitted yet |
+| `stream.settled` | `settlement_version` (1), `day` (`YYYY-MM-DD`), `state` (`settled` or `gapped`), `supplement` (integer, at least 0), `previous_settlement` (null, or an object `sequence`, `entry_hash`), `receipts` (an object `count`, `last_receipt_hash`: 64 hex or null), `gaps` (a list of objects `gap_id`, `from`, `to`, `reason`, `healed`) |
+
+Fields other than these, in these payloads, are ignored. The rules below
+are applied per resource, in sequence order over the exported range, and
+every failure demotes `content_integrity`. "Anchored" means the bundle's
+range starts at sequence 1: nothing precedes it, so every link must
+resolve inside the bundle. In a bundle that starts later, a link to a
+receipt, gap or settlement before `range.from` cannot be checked from the
+bundle; it is noted, never failed, and the chain is checked from the
+first record inside the range onwards.
+
+1. **Versions.** Each payload's version field must be the integer 1. A
+   value this format does not define fails: a later version of a record
+   arrives with a later format, never silently.
+2. **Receipt chain.** Within the range, each receipt's `prev_receipt_hash`
+   must equal the `entry_hash` of the previous receipt on the same
+   resource, its `receipt_index` must be that receipt's index plus one,
+   and its `cursor_before` must canonically equal that receipt's
+   `cursor_after`. The first receipt on a resource in the bundle: with
+   `receipt_index` 1 it must name the zero hash (64 zeros); with a higher
+   index it fails in an anchored bundle (the earlier receipts are missing)
+   and is noted otherwise. A receipt's `record_count` must be 0 when
+   `records` is null, and at most `to_sequence - from_sequence + 1` when
+   it is not; `from_sequence` must not exceed `to_sequence`.
+3. **Gaps.** A gap's `declared_after_receipt_hash` must equal the
+   `entry_hash` of the latest receipt on the resource before it in the
+   bundle; when none precedes it, the zero hash in an anchored bundle,
+   noted otherwise. `from` must precede `to`. A `gap_id` declared twice on
+   a resource fails. `stream.gap_healed` marks a declared gap healed; one
+   naming a gap the chain never declared fails in an anchored bundle and
+   is noted otherwise.
+4. **Settlement.** `receipts.last_receipt_hash` must equal the
+   `entry_hash` of the latest receipt on the resource before the
+   settlement (null when none precedes it in an anchored bundle; noted
+   when none precedes it otherwise). `receipts.count` must equal the
+   number of receipts seen on the resource in an anchored bundle, and be
+   no smaller than it otherwise. Every listed gap must have been declared
+   on the resource earlier in the bundle (noted when it was declared
+   before the range) with the same `from`, `to` and `reason`, and its
+   `healed` must agree with the chain. `state` must be `gapped` when any
+   listed gap is unhealed and `settled` when none is. A settlement with
+   `supplement` 0 names no previous settlement, and a day settled twice
+   with supplement 0 on one resource fails. A supplement `n` (from 1) must
+   name, by `sequence` and `entry_hash`, the settlement of the same day
+   with supplement `n - 1` earlier in the bundle; one naming a sequence
+   inside the range that the chain does not hold fails, one naming a
+   sequence before the range is noted.
+5. **Order.** In an anchored bundle, a receipt, gap or settlement on a
+   resource before that resource's first `stream.config` fails. A
+   `stream.config` that names a different `records_stream` from an earlier
+   one on the same resource fails.
+6. **Redacted records.** A collection record whose payload is absent
+   (declared, as the redaction rule requires) is noted; the links that
+   need its payload are not checked, and later records chain from its
+   entry hash.
+7. **`connection.json`.** With `role` `receipts`, `record_streams` lists
+   objects `stream_key`, `stream`: each configuration seen in the range
+   must be listed with the same `records_stream`, and in an anchored
+   bundle every listed stream must have a configuration in the range; a
+   file saying `receipts` over a range with no collection record fails.
+   With `role` `records`, `receipt_stream` names the stream holding the
+   receipts; the verifier notes it and checks nothing further in that
+   bundle. A file with any other shape fails. An absent file is noted.
+
+The verifier reports, per resource, how many receipts chained, how many
+gaps were declared and how many settlement records it checked. Formats
+before 1.6 do not define these records; a bundle at an earlier format
+carrying them is verified as events alone.
 
 ## Verifier behaviour
 

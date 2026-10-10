@@ -34,6 +34,9 @@ jobs:
       # The committed consistency fixtures must be what the generator produces.
       - run: php tools/build-corpus-consistency.php
 
+      # And the committed collection-record fixtures (format 1.6).
+      - run: php tools/build-corpus-collection.php
+
   differential:
     runs-on: ubuntu-latest
     name: Differential (verify.php vs sigilbase-verify)
