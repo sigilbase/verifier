@@ -37,6 +37,9 @@ jobs:
       # And the committed collection-record fixtures (format 1.6).
       - run: php tools/build-corpus-collection.php
 
+      # And the shape fixtures derived from valid.zip (FORMAT.md, "Field types").
+      - run: php tools/build-corpus-shape.php
+
   differential:
     runs-on: ubuntu-latest
     name: Differential (verify.php vs sigilbase-verify)
