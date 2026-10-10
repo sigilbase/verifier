@@ -16,6 +16,9 @@ declare(strict_types=1);
  *   collection-gapped-state.zip      a settlement saying settled over an unhealed gap
  *   collection-connection-json.zip   connection.json contradicting the chain's configuration
  *   collection-format-1-5.zip        the broken link at format 1.5: verified as events alone
+ *   collection-gap-healed.zip        a backfill receipt, the heal of gap-1 and the supplement settling its day
+ *   collection-heal-unknown-gap.zip  a heal naming a gap the chain never declared
+ *   collection-healed-state.zip      a supplement still saying gapped after the heal
  *
  * Run from the repository root:
  *
@@ -106,6 +109,23 @@ $wrongState[5]['payload'] = CollectionHistory::with($wrongState[5]['payload'], [
 $build('collection-gapped-state', $wrongState, ['connection' => $connection]);
 
 $build('collection-connection-json', $history, ['connection' => CollectionHistory::connectionJson('some-other-stream')]);
+
+// The history continued by a healing backfill, and the two ways a heal can
+// be contradicted: by naming a gap never declared, and by a supplement that
+// does not take it into account.
+$healed = CollectionHistory::healed();
+$build('collection-gap-healed', $healed, ['connection' => $connection]);
+
+$unknownHeal = CollectionHistory::healed();
+$unknownHeal[9]['payload'] = CollectionHistory::with($unknownHeal[9]['payload'], ['gap_id' => 'gap-9']);
+$unknownHeal[10]['payload'] = static fn (array $built): object => CollectionHistory::settled($built, '2026-07-02', 'gapped', [
+    ['gap_id' => 'gap-1', 'from' => '2026-07-02T09:00:00.000000Z', 'to' => '2026-07-02T10:00:00.000000Z', 'reason' => 'connection_paused', 'healed' => false],
+], 1, CollectionHistory::settlementOf($built, '2026-07-02'));
+$build('collection-heal-unknown-gap', $unknownHeal, ['connection' => $connection]);
+
+$staleState = CollectionHistory::healed();
+$staleState[10]['payload'] = CollectionHistory::with($staleState[10]['payload'], ['state' => 'gapped']);
+$build('collection-healed-state', $staleState, ['connection' => $connection]);
 
 $iterator = new RecursiveIteratorIterator(
     new RecursiveDirectoryIterator($work, FilesystemIterator::SKIP_DOTS),
