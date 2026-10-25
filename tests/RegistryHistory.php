@@ -41,7 +41,7 @@ final class RegistryHistory
 
     public const SECOND = 'sgb_second00000002';
 
-    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause'];
+    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause', 'backdated-tail', 'stale-log', 'truncated-tail'];
 
     /**
      * The variant's own changes to the first policy's rules, while it is written.
@@ -147,8 +147,12 @@ final class RegistryHistory
             self::submission('gamma-q3', '2026-07-01T11:05:00.000000Z', 'filer:gamma', 'cc'),
         ];
 
-        if ($variant === 'extra-event' || $variant === 'double-acceptance') {
+        if ($variant === 'extra-event' || $variant === 'double-acceptance' || $variant === 'backdated-tail') {
             $registrySpecs[] = self::submission('acme-q3', '2026-07-01T11:15:00.000000Z', 'filer:acme', 'dd');
+        }
+
+        if ($variant === 'stale-log') {
+            $registrySpecs[] = self::submission('beta-q3', '2026-07-01T11:20:00.000000Z', 'filer:beta', 'bb');
         }
 
         if ($variant === 'late-acceptance') {
@@ -249,17 +253,17 @@ final class RegistryHistory
             'registry-ahead' => null,
             // delta-q3 accepted at 09:40 as a third registry event, which the
             // registry, holding events to 11:05, never had.
-            'phantom-acceptance' => array_splice($decisions, 8, 0, [
+            'phantom-acceptance' => array_splice($decisions, 9, 0, [
                 self::decision('accepted', '2026-07-01T09:40:00.000000Z', 'delta-q3', self::otherDigest('delta-phantom'), self::FILER, (object) ['seq' => 3, 'entry_hash' => str_repeat('ab', 32)], self::otherDigest('delta-phantom')),
             ]),
             // delta-q3's first filing refused as a conflict with a holder
             // that was never accepted.
-            'false-conflict' => array_splice($decisions, 8, 0, [
+            'false-conflict' => array_splice($decisions, 9, 0, [
                 self::decision('conflict', '2026-07-01T09:40:00.000000Z', 'delta-q3', self::otherDigest('delta-first'), self::FILER, (object) ['seq' => 99, 'entry_hash' => str_repeat('cd', 32)], self::otherDigest('delta-holder'), ['digest_mismatch']),
             ]),
             // Version 2, under the full day's notice, asks only an hour of its
             // own; version 3 amends it while it is still pending.
-            'pending-amendment' => array_splice($decisions, 8, 0, [
+            'pending-amendment' => array_splice($decisions, 9, 0, [
                 ...self::amendment(2, ['notice_seconds' => 3600], '2026-07-01T09:40:00.000000Z', '2026-07-02T09:40:00.000000Z'),
                 ...self::amendment(3, ['notice_seconds' => 3600], '2026-07-01T09:45:00.000000Z', '2026-07-02T10:45:00.000000Z'),
             ]),
@@ -272,6 +276,20 @@ final class RegistryHistory
                 self::decision('refused_paused', '2026-07-01T11:22:00.000000Z', 'delta-q3', self::otherDigest('delta-paused'), self::FILER, null, null),
                 self::record('2026-07-01T11:23:00.000000Z', 'stream.resumed', ['v' => 1], 'user:owner-1'),
             ),
+            // An event no decision accepts, hidden behind a last log record
+            // backdated to 08:00, so the event seems to come after the log.
+            'backdated-tail' => array_push($decisions,
+                self::record('2026-07-01T08:00:00.000000Z', 'credential.issued', [
+                    'v' => 1, 'credential' => 'sgb_backdated00003', 'scope' => 'all', 'expires_at' => null,
+                ], 'user:owner-1'),
+            ),
+            // A log exported at 09:10, before the registry took gamma-q3 and
+            // a beta-q3 acceptance after its window closed: whether those
+            // were decided at all cannot be told until the log is exported
+            // again.
+            'stale-log' => array_splice($decisions, 4),
+            // The last decision, a receipted refusal, dropped from the log.
+            'truncated-tail' => array_pop($decisions),
             // A refusal for a pause the log never records.
             'false-pause' => array_push($decisions,
                 self::decision('refused_paused', '2026-07-01T11:22:00.000000Z', 'delta-q3', self::otherDigest('delta-paused'), self::FILER, null, null),

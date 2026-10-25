@@ -211,6 +211,43 @@ final class RegistryCorpusTest extends TestCase
         self::assertStringContainsString('WINDOW_CLOSE: key []', implode("\n", $GLOBALS['failures']));
     }
 
+    public function testATrustedAnchorAfterASealDeadlineTurnsAMissingRecordIntoAFailure(): void
+    {
+        require_once dirname(__DIR__).'/verify.php';
+
+        $root = dirname(__DIR__).'/corpus/registry/';
+        $receipt = $root.'receipts/13-refused_late.json';
+        $sealBy = json_decode((string) file_get_contents($receipt), false)->body->seal_by;
+
+        // The truncated log ends at 11:10 and its last checkpoint a minute
+        // later; the dropped refusal was due sealed at 11:35. Without an
+        // anchor the run cannot tell it from a later decision; with one a
+        // timestamp authority dated after 11:35, it is missing.
+        $run = function (?int $anchoredAt) use ($root, $receipt): array {
+            $GLOBALS['failures'] = [];
+            $GLOBALS['notes'] = [];
+            $GLOBALS['reason'] = null;
+            $GLOBALS['unconfirmedReason'] = null;
+            $GLOBALS['quiet'] = true;
+            $GLOBALS['results'] = ['content_integrity' => 'pass', 'signing_identity' => 'pass', 'timestamps' => 'pass', 'scope' => 'pass', 'redactions' => 'pass'];
+            $GLOBALS['trustedReceiptKeys'] = load_receipt_key_file($root.'receipt-keys.json');
+
+            reconcile_registry(
+                load_verified_bundle($root.'truncated-tail-registry.zip') + ['anchored_at' => null],
+                load_verified_bundle($root.'truncated-tail-log.zip') + ['anchored_at' => $anchoredAt],
+                [$receipt],
+            );
+
+            return [run_reason(), $GLOBALS['results']['content_integrity'], $GLOBALS['results']['scope']];
+        };
+
+        $after = (new \DateTimeImmutable($sealBy))->getTimestamp() + 60;
+
+        self::assertSame(['RECEIPT_NOT_LOGGED', 'pass', 'unconfirmed'], $run(null));
+        self::assertSame(['RECEIPT_NOT_LOGGED', 'pass', 'unconfirmed'], $run($after - 120));
+        self::assertSame(['RECEIPT_NOT_LOGGED', 'fail', 'pass'], $run($after));
+    }
+
     public function testEveryReceiptFileInTheDirectoryIsCountedAndNothingElse(): void
     {
         $expected = self::expected();
