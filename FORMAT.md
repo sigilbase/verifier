@@ -505,7 +505,9 @@ as a submitter's SDK exports them.
    (`POLICY_AMENDMENT`). Each policy's `registry` is the registry's public
    id: the log's own signed records, not the manifest, bind it to the
    registry. Versions run 1, 2, 3 in log order, version 1
-   `policy.committed` and every later one `policy.amended`. A policy whose
+   `policy.committed` and every later one `policy.amended`. Every policy's
+   `msd_seconds` is 900, the seal delay every receipt's `seal_by` is signed
+   with. A policy whose
    `amendment` is `notice` has an integer `notice_seconds` from 3600 to
    3155760000 (an hour to a hundred years). A version may be amended only
    when its `amendment` is `notice` and it is in force: the amendment's
