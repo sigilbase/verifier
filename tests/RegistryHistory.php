@@ -40,7 +40,7 @@ final class RegistryHistory
 
     public const SECOND = 'sgb_second00000002';
 
-    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal'];
+    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log'];
 
     /**
      * The receipt key: [public key hex, secret key, key_id].
@@ -100,6 +100,7 @@ final class RegistryHistory
             (object) ['key' => 'acme-q3', 'open_at' => '2026-07-01T09:00:00.000000Z', 'close_at' => '2026-07-01T12:00:00.000000Z'],
             (object) ['key' => 'beta-q3', 'open_at' => '2026-07-01T09:00:00.000000Z', 'close_at' => '2026-07-01T10:30:00.000000Z'],
             (object) ['key' => 'gamma-q3', 'open_at' => '2026-07-01T11:00:00.000000Z', 'close_at' => '2026-07-01T12:00:00.000000Z'],
+            (object) ['key' => 'delta-q3', 'open_at' => '2026-07-01T09:00:00.000000Z', 'close_at' => '2026-07-01T12:00:00.000000Z'],
         ];
 
         $full = clone $rules;
@@ -131,6 +132,14 @@ final class RegistryHistory
             $registrySpecs[] = self::submission('acme-q3', '2026-07-01T11:15:00.000000Z', 'filer:acme', 'dd');
         }
 
+        if ($variant === 'late-acceptance') {
+            $registrySpecs[] = self::submission('beta-q3', '2026-07-01T11:25:00.000000Z', 'filer:beta', 'bb');
+        }
+
+        if ($variant === 'live-log') {
+            $registrySpecs[] = self::submission('delta-q3', '2026-07-01T11:30:00.000000Z', 'filer:delta', 'ee');
+        }
+
         // Every record sealed a minute after it was received, well inside
         // its seal_by, as a seal running every few minutes would.
         $registryOptions = [
@@ -148,6 +157,15 @@ final class RegistryHistory
             $registrySpecs,
         ), $registryOptions);
 
+        if ($variant === 'live-log') {
+            // Exported before its third event arrived: the log, exported
+            // after, accepts an event this bundle does not hold yet.
+            $registryGenerator->writeStreamBundle($dir.DIRECTORY_SEPARATOR.'registry', array_map(
+                static fn (array $spec): array => $spec['event'],
+                array_slice($registrySpecs, 0, 2),
+            ), $registryOptions);
+        }
+
         // ---- the decision log ---------------------------------------------
 
         $policy = self::policy();
@@ -157,7 +175,7 @@ final class RegistryHistory
         $decisions = [
             self::record('2026-07-01T09:00:00.000000Z', 'policy.committed', [
                 'v' => 1, 'version' => 1, 'policy_hash' => $policy['hash'], 'effective_at' => '2026-07-01T09:00:00.000000Z',
-                'policy' => $policy['rules'], 'windows' => (object) ['count' => 3, 'parts' => 1],
+                'policy' => $policy['rules'], 'windows' => (object) ['count' => 4, 'parts' => 1],
             ], 'user:owner-1'),
             self::record('2026-07-01T09:00:00.000000Z', 'policy.windows', [
                 'v' => 1, 'version' => 1, 'part' => 1, 'parts' => 1, 'windows' => $policy['windows'],
@@ -197,6 +215,16 @@ final class RegistryHistory
             'missing-close' => array_splice($decisions, 9, 1),
             // gamma-q3 accepted from the second key after its revocation.
             'revoked-credential' => self::moveRevocationBeforeGamma($decisions),
+            // beta-q3 accepted at 11:25, after its window closed at 10:30.
+            'late-acceptance' => array_push($decisions,
+                self::decision('accepted', '2026-07-01T11:25:00.000000Z', 'beta-q3', $registrySpecs[2]['digest'], self::FILER, $registryEvents[2], $registrySpecs[2]['digest']),
+            ),
+            // The frozen policy amended, backdated to drop beta-q3's window.
+            'frozen-amended' => array_push($decisions, ...self::backdatedAmendment()),
+            // delta-q3 accepted after the registry bundle was exported.
+            'live-log' => array_push($decisions,
+                self::decision('accepted', '2026-07-01T11:30:00.000000Z', 'delta-q3', $registrySpecs[2]['digest'], self::FILER, $registryEvents[2], $registrySpecs[2]['digest']),
+            ),
             default => null,
         };
 
@@ -327,6 +355,31 @@ final class RegistryHistory
             'received_at' => $at,
             'policy_hash' => self::policy()['hash'],
         ], 'sigilbase:ingress');
+    }
+
+    /**
+     * A second policy amending the frozen first one, recorded at 11:30 and
+     * effective from 09:00, without beta-q3's window.
+     *
+     * @return list<array{event: array<string, mixed>}>
+     */
+    private static function backdatedAmendment(): array
+    {
+        $policy = self::policy();
+        $windows = array_values(array_filter($policy['windows'], static fn (object $window): bool => $window->key !== 'beta-q3'));
+        $full = clone $policy['rules'];
+        $full->windows = $windows;
+        $hash = 'sha256:'.hash('sha256', canonical_encode($full));
+
+        return [
+            self::record('2026-07-01T11:30:00.000000Z', 'policy.amended', [
+                'v' => 1, 'version' => 2, 'policy_hash' => $hash, 'effective_at' => '2026-07-01T09:00:00.000000Z',
+                'policy' => $policy['rules'], 'windows' => (object) ['count' => count($windows), 'parts' => 1],
+            ], 'user:owner-1'),
+            self::record('2026-07-01T11:30:00.000000Z', 'policy.windows', [
+                'v' => 1, 'version' => 2, 'part' => 1, 'parts' => 1, 'windows' => $windows,
+            ], 'user:owner-1'),
+        ];
     }
 
     /**
