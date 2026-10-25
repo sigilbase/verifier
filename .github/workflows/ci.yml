@@ -40,6 +40,9 @@ jobs:
       # And the shape fixtures derived from valid.zip (FORMAT.md, "Field types").
       - run: php tools/build-corpus-shape.php
 
+      # And the receipt and registry fixtures (format 1.7, verifier 1.8).
+      - run: php tools/build-corpus-registry.php
+
   differential:
     runs-on: ubuntu-latest
     name: Differential (verify.php vs sigilbase-verify)
@@ -52,10 +55,22 @@ jobs:
       # The Go implementation lives in its own repository and mirrors this
       # one's corpus, vectors, keys and schema. Its differential tool runs
       # both verifiers over every fixture in this checkout's corpus and
-      # fails on any difference in exit code, results or document.
+      # fails on any difference in exit code, results or document. A change
+      # to both lands as two branches of one name: when verifier-go has a
+      # branch named like this one, that branch is the one held to it.
+      - id: go-ref
+        run: |
+          branch="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code --heads https://github.com/sigilbase/verifier-go.git "$branch" >/dev/null 2>&1; then
+            echo "ref=$branch" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
         with:
           repository: sigilbase/verifier-go
+          ref: ${{ steps.go-ref.outputs.ref }}
           path: verifier-go
 
       - uses: shivammathur/setup-php@v2

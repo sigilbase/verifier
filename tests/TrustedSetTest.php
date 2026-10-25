@@ -46,6 +46,32 @@ final class TrustedSetTest extends TestCase
         );
     }
 
+    public function testTheCompiledReceiptKeysEqualThePublishedFile(): void
+    {
+        $document = json_decode((string) file_get_contents(dirname(__DIR__).'/keys/receipt-keys.json'), true);
+
+        self::assertIsArray($document);
+        self::assertArrayHasKey('keys', $document);
+
+        $expected = array_map(static fn (array $key): array => [
+            'key_id' => $key['key_id'],
+            'public_key' => $key['public_key'],
+            'algorithm' => $key['algorithm'],
+            'created_at' => $key['created_at'],
+            'retired_at' => $key['retired_at'] ?? null,
+        ], $document['keys']);
+
+        self::assertSame(
+            $expected,
+            TRUSTED_RECEIPT_KEYS,
+            'verify.php and keys/receipt-keys.json disagree; run php tools/compile-keys.php',
+        );
+
+        foreach (TRUSTED_RECEIPT_KEYS as $key) {
+            self::assertSame(hash('sha256', (string) hex2bin($key['public_key'])), $key['key_id']);
+        }
+    }
+
     public function testEveryKeyIdIsTheFingerprintOfItsKey(): void
     {
         // The id is a fingerprint anyone can recompute from the key bytes,

@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 /**
  * Compiles keys/sigilbase.json into the TRUSTED_SIGNING_KEYS constant in
- * verify.php, and keys/tsa-roots.pem into TRUSTED_TSA_ROOTS.
+ * verify.php, keys/receipt-keys.json into TRUSTED_RECEIPT_KEYS, and
+ * keys/tsa-roots.pem into TRUSTED_TSA_ROOTS.
  *
  * verify.php has to stay a single dependency-free file an auditor can
  * read end to end - it cannot load a JSON file that sits beside it,
@@ -72,6 +73,57 @@ foreach ($decoded['keys'] as $key) {
 }
 
 $source = replace_block($source, 'TRUSTED_SIGNING_KEYS', "const TRUSTED_SIGNING_KEYS = [\n".implode('', $entries).'];');
+
+// ---- receipt keys ---------------------------------------------------------
+
+$receiptKeysPath = $root.'/keys/receipt-keys.json';
+$decoded = json_decode((string) file_get_contents($receiptKeysPath), true);
+
+if (! is_array($decoded) || ! isset($decoded['keys']) || ! is_array($decoded['keys'])) {
+    fwrite(STDERR, "compile-keys: keys/receipt-keys.json has no keys array
+");
+    exit(2);
+}
+
+$receiptEntries = [];
+
+foreach ($decoded['keys'] as $key) {
+    foreach (['key_id', 'public_key', 'algorithm', 'created_at'] as $field) {
+        if (! array_key_exists($field, $key)) {
+            fwrite(STDERR, "compile-keys: a receipt key is missing [{$field}]
+");
+            exit(2);
+        }
+    }
+
+    // A receipt names its key by the full SHA-256 of the raw public key.
+    $expected = hash('sha256', (string) hex2bin($key['public_key']));
+
+    if ($key['key_id'] !== $expected) {
+        fwrite(STDERR, "compile-keys: receipt key_id [{$key['key_id']}] is not the SHA-256 of its public key (expected {$expected})
+");
+        exit(2);
+    }
+
+    $receiptEntries[] = sprintf(
+        "    [
+        'key_id' => '%s',
+        'public_key' => '%s',
+        'algorithm' => '%s',
+        'created_at' => '%s',
+        'retired_at' => %s,
+    ],
+",
+        $key['key_id'],
+        $key['public_key'],
+        $key['algorithm'],
+        $key['created_at'],
+        ($key['retired_at'] ?? null) === null ? 'null' : "'".$key['retired_at']."'",
+    );
+}
+
+$source = replace_block($source, 'TRUSTED_RECEIPT_KEYS', "const TRUSTED_RECEIPT_KEYS = [
+".implode('', $receiptEntries).'];');
 
 // ---- timestamp trust roots ------------------------------------------------
 
