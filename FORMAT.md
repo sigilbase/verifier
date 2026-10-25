@@ -471,13 +471,23 @@ names a directory of receipt documents (`*.json`, read in name order),
 as a submitter's SDK exports them.
 
 1. **The log is the registry's and is complete** (`NOT_DECISION_LOG`,
-   `LOG_NOT_DENSE`). The log bundle's `decision_log_for.public_id` names
+   `LOG_NOT_DENSE`, `NOT_TIME_ORDERED`). The log bundle's `decision_log_for.public_id` names
    the registry bundle's `stream.public_id`. Both bundles start at
    sequence 1, so nothing in either history is outside what is checked.
-   Export the log first and the registry after it. Both are written in
-   time order under the registry's lock, so a record past one bundle's
-   range is either later than that bundle's last record, made after its
-   export, or missing from it: rules 6 and 10 tell the two apart.
+   Both bundles are written in time order under the registry's lock: in
+   each, every event's `received_at` is no earlier than the one before it
+   (`NOT_TIME_ORDERED`). Export the full history of each, the log first
+   and the registry after it. A record past one bundle's range is then
+   either later than that bundle's export or missing from it, and rules 6
+   and 10 tell the two apart where the bundles can: a record received
+   before the bundle's last record is missing, and so is one due to be
+   sealed (its `received_at` plus the policy's `msd_seconds`, or its
+   receipt's `seal_by`) no later than the bundle was known complete. A
+   bundle is known complete at its latest checkpoint's `created_at` or,
+   when later, the latest `genTime` of an anchor in it that verifies
+   against trusted roots: the bundle was exported after both, and no
+   operator can backdate an anchor. A record neither rule places is
+   unconfirmed, never passed: export the other bundle again.
 2. **The log opens on its policy** (`FIRST_NOT_POLICY`). Event 1 is
    `policy.committed`.
 3. **Every policy is what its hash says** (`POLICY_HASH`).
@@ -527,12 +537,14 @@ as a submitter's SDK exports them.
    registry whose request digest (with the decision's `commitment_key`)
    is the decision's `request_digest` and whose `received_at` is the
    decision's. An acceptance of a sequence past the registry bundle's
-   `range.to`, received no earlier than the bundle's last event, leaves
-   the run unconfirmed (`ACCEPTED_UNMATCHED`, scope): export the registry
-   again. Every event of the registry is named by exactly one, except
-   events past every sequence the log accepts and received after the
-   log's last record, which were decided after the log's export and are
-   noted.
+   `range.to` fails when rule 1 places its event in that bundle's range
+   (the acceptance came before the bundle's last event, or the event was
+   due sealed by the time the bundle was known complete), and otherwise
+   leaves the run unconfirmed (`ACCEPTED_UNMATCHED`, scope). Every event
+   of the registry is named by exactly one, except events past every
+   sequence the log accepts and received after the log's last record:
+   their decisions may be past the log's export, and they leave the run
+   unconfirmed (`PARENT_UNMATCHED`, scope).
 7. **One acceptance per key** (`DOUBLE_ACCEPTANCE`).
 8. **Every window closes once, truthfully** (`WINDOW_CLOSE`). A
    `window.closed` names a `key` in the policy whose hash it carries, with
@@ -561,9 +573,11 @@ as a submitter's SDK exports them.
    included; then the rest of the `--receipt` check applies against the
    two bundles, the records it names and its seal deadline included
    (`RECEIPT_SUBJECT`, `MSD_BREACH`). A receipt whose `decision_seq` is
-   past the log bundle's `range.to`, received no earlier than the log's
-   last record, leaves the run unconfirmed (`RECEIPT_NOT_LOGGED`, scope):
-   export the log again. A receipt
+   past the log bundle's `range.to` fails when rule 1 places its record
+   in the log's range (it was received before the log's last record, or,
+   for any outcome but `accepted`, whose `seal_by` is its event's, its
+   `seal_by` is no later than the log was known complete), and otherwise
+   leaves the run unconfirmed (`RECEIPT_NOT_LOGGED`, scope). A receipt
    naming another stream is noted and set aside; a file that is not a
    receipt document fails `RECEIPT_SHAPE` and counts as checked. The
    directory's files are its regular files whose names end in `.json` and
