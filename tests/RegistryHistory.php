@@ -41,7 +41,7 @@ final class RegistryHistory
 
     public const SECOND = 'sgb_second00000002';
 
-    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause', 'backdated-tail', 'stale-log', 'truncated-tail'];
+    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause', 'backdated-tail', 'stale-log', 'truncated-tail', 'truncated-accept'];
 
     /**
      * The variant's own changes to the first policy's rules, while it is written.
@@ -290,6 +290,9 @@ final class RegistryHistory
             'stale-log' => array_splice($decisions, 4),
             // The last decision, a receipted refusal, dropped from the log.
             'truncated-tail' => array_pop($decisions),
+            // gamma-q3's acceptance and all after it dropped, the log then
+            // sealed at 11:30, past the acceptance's 11:20 deadline.
+            'truncated-accept' => array_splice($decisions, 10),
             // A refusal for a pause the log never records.
             'false-pause' => array_push($decisions,
                 self::decision('refused_paused', '2026-07-01T11:22:00.000000Z', 'delta-q3', self::otherDigest('delta-paused'), self::FILER, null, null),
@@ -297,14 +300,25 @@ final class RegistryHistory
             default => null,
         };
 
-        $logEvents = $logGenerator->writeStreamBundle($dir.DIRECTORY_SEPARATOR.'log', array_map(
-            static fn (array $decision): array => $decision['event'],
-            $decisions,
-        ), [
+        $logOptions = [
             'stream' => ['slug' => 'sigilbase-decisions-'.self::REGISTRY_PUBLIC_ID, 'name' => 'Decision log: Filings 2026', 'public_id' => 'e0e1e2e3e4e5e6e7e8e9eaebecedeeef'],
             'manifest' => ['decision_log_for' => ['id' => self::REGISTRY_STREAM, 'public_id' => self::REGISTRY_PUBLIC_ID, 'slug' => 'filings']],
             'per_checkpoint' => 1,
-        ]);
+        ];
+
+        if ($variant === 'truncated-accept') {
+            // Each record sealed a minute after it, as usual, but the last
+            // checkpoint signed at 11:30: the log known complete then.
+            $lastSeq = count($decisions);
+            $logOptions['created_at'] = static fn (object $last): string => $last->seq === $lastSeq
+                ? '2026-07-01T11:30:00.000000Z'
+                : (new DateTimeImmutable($last->received_at))->modify('+1 minute')->format('Y-m-d\TH:i:s.u\Z');
+        }
+
+        $logEvents = $logGenerator->writeStreamBundle($dir.DIRECTORY_SEPARATOR.'log', array_map(
+            static fn (array $decision): array => $decision['event'],
+            $decisions,
+        ), $logOptions);
 
         // ---- the receipts the submitters hold -----------------------------
 

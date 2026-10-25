@@ -241,7 +241,7 @@ final class RegistryCorpusTest extends TestCase
             return [run_reason(), $GLOBALS['results']['content_integrity'], $GLOBALS['results']['scope']];
         };
 
-        $after = (new \DateTimeImmutable($sealBy))->getTimestamp() + 60;
+        $after = (new \DateTimeImmutable($sealBy))->getTimestamp() + SEAL_GRACE_SECONDS + 60;
 
         self::assertSame(['RECEIPT_NOT_LOGGED', 'pass', 'unconfirmed'], $run(null));
         self::assertSame(['RECEIPT_NOT_LOGGED', 'pass', 'unconfirmed'], $run($after - 120));
