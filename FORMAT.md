@@ -8,7 +8,7 @@ the verifier's behaviour are authoritative. Anything not specified is not
 part of the format; consumers must ignore unknown fields and files rather
 than reject them.
 
-The current format identifier is **`sigilbase-evidence/1.6`**.
+The current format identifier is **`sigilbase-evidence/1.7`**.
 
 ## Compatibility
 
@@ -25,6 +25,7 @@ bundle format version are distinct:
 | 1.5.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Reports five results (content integrity, signing identity, timestamps, scope, redactions) and four exit codes (0 pass, 1 fail, 2 error, 3 unconfirmed). Carries a trusted signing key set and timestamp trust roots, so a bundle signed with a key the verifier does not know is UNCONFIRMED rather than PASS; `--keys` and `--tsa-roots` replace either set. An absent payload is accepted only against an authenticated declaration in the bundle that names that event, so a bundle below 1.5 carrying an absent payload now fails and must be exported again. Reads `events.ndjson` a line at a time, so bundle size no longer bounds who can verify |
 | 1.6.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.5` | Adds a second implementation, `sigilbase-verify` (Go), released under the same tag and held to the same exit code and results as `verify.php` on every corpus fixture; specifies parsing, Ed25519 acceptance and the accepted token algorithms (see *Parsing* and *Ed25519 acceptance* below); carries the production timestamp trust roots, so anchored production bundles pass by default and a bundle anchored by an authority the verifier does not carry fails `timestamps` unless `--tsa-roots` names it; reports `verifier_name` in the `--json` document, described by `result.schema.json`; and no longer stops on a hostile field type or date, reporting a failure of that record instead |
 | 1.7.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.6` | Adds the collection records of format 1.6: receipt chains, declared gaps and settlement records in a connection's receipt stream are checked against each other and against `connection.json`, in both implementations |
+| 1.8.x | `sigilbase-evidence/1` through `sigilbase-evidence/1.7` | Adds two modes over format 1.7 (see *Receipts and registries* below): `--receipt` checks a signed ingress receipt against the receipt keys and, given bundles, against the records it names and the seal deadline it promised; `--reconcile` checks that a registry stream and its decision log account for every request, and that every receipt a submitter holds is logged. Carries a trusted receipt key set (`keys/receipt-keys.json`); `--receipt-keys` replaces it. Bundles verify exactly as before |
 
 Format 1.1 is strictly additive over format 1: it adds `anchors.json`
 (always present, possibly an empty list) and `consistency.json` (present
@@ -98,13 +99,26 @@ specifies; `connection.json`, when present, is cross-checked against them
 and a contradiction fails the bundle. Nothing about the hashing or
 verification mathematics changes.
 
+Format 1.7 is strictly additive over format 1.6: the manifest's `stream`
+gains `public_id`, the stream's public identifier (the one its receipts and
+its transparency feed name), and a decision log's bundle carries
+`decision_log_for`, naming the stream whose decisions it records (`id`,
+`public_id`, `slug`). Both are read only by the `--receipt` and
+`--reconcile` modes, at whatever format id the bundle carries (an
+exporter may add them before it moves to 1.7, as unknown fields are
+ignored); ordinary verification ignores them, so a bundle verifies exactly
+as it would at 1.6. The manifest is the bundle's own claim: `--reconcile`
+also binds the log to the registry through each policy's signed
+`registry` field. Nothing about the hashing or
+verification mathematics changes.
+
 ## Bundle contents
 
 A bundle is a zip archive (or the equivalent extracted directory):
 
 | File | Purpose | Since |
 | --- | --- | --- |
-| `manifest.json` | Format id, stream identity (`stream.class` of `standard` or `telemetry` from 1.5.1 exports, informational: a telemetry class prints the telemetry honesty text under the summary), exported range, signing keys | 1 |
+| `manifest.json` | Format id, stream identity (`stream.class` of `standard` or `telemetry` from 1.5.1 exports, informational: a telemetry class prints the telemetry honesty text under the summary; `stream.public_id` from 1.7), exported range, signing keys; a decision log's names its parent in `decision_log_for` (1.7) | 1 |
 | `events.ndjson` | The events, one canonical JSON object per line | 1 |
 | `checkpoints.json` | The signed checkpoints covering the range | 1 |
 | `anchors.json` | RFC 3161 timestamp tokens over checkpoint hashes | 1.1 |
@@ -270,7 +284,7 @@ set of event actions in the receipt stream, one chain per connector
 stream, keyed by the event's `resource`, which is `connection-stream:`
 followed by the stream key. From format 1.6 those actions are part of the
 format, their payload fields are fixed, and the verifier checks them
-whenever a format 1.6 bundle holds any of them. `connection.json` is not
+whenever a bundle at format 1.6 or later holds any of them. `connection.json` is not
 what triggers the checks: a bundle with the file removed is checked the
 same way, so removing it silences nothing.
 
@@ -348,6 +362,246 @@ The verifier reports, per resource, how many receipts chained, how many
 gaps were declared and how many settlement records it checked. Formats
 before 1.6 do not define these records; a bundle at an earlier format
 carrying them is verified as events alone.
+
+## Receipts and registries
+
+Sigilbase signs a receipt for every ingress decision it answers with a
+signature: each event appended through the events API, each idempotent
+replay, and on a stream that records them, each refused request. A
+registry stream accepts exactly one event per commitment key and records
+every decision, accepted or refused, in its decision log, an ordinary
+stream whose bundle names the registry in `decision_log_for`. From
+verifier 1.8 two modes check them: `--receipt` one receipt, and
+`--reconcile` a registry with its decision log and, optionally, the
+receipts its submitters hold.
+
+### Receipts
+
+A receipt document is the JSON object `{"body": {...}, "signature":
+"..."}`. The API's envelope `{"receipt": {...}, "receipt_pending": ...}` is
+read through its `receipt`. The signature is Ed25519, base64 (64 bytes
+decoded), over the bytes `sigilbase-receipt/1`, a newline, and the
+canonical form of `body` (see *Canonical JSON*). These prefixed bytes can
+never be a 32-byte checkpoint hash, so no signature is valid as both.
+
+| Body field | Type | Meaning |
+| --- | --- | --- |
+| `v` | the string `sigilbase-receipt/1` | |
+| `tenant`, `stream` | string | public ids of the workspace and of the stream the request was sent to |
+| `outcome` | string | `accepted`, `replay` or `conflict` on a standard stream; on a registry also `invalid`, `refused_early`, `refused_late`, `refused_scope`, `refused_paused`, `refused_archived`, `throttled` |
+| `request_digest` | `sha256:` and 64 hex | the request, as defined below |
+| `digest_kind` | `canonical` or `raw` | `raw`: SHA-256 of the request body's bytes, written when the body was not a valid submission |
+| `credential` | string | the public key id of the API key that sent the request |
+| `accepted` | object `sequence`, `entry_hash`, `request_digest`, or null | the event the request is accounted to, with the digest it was accepted under |
+| `received_at`, `seal_by`, `signed_at` | RFC 3339 | when the request was decided; the latest a checkpoint sealing it may be signed; when the receipt was signed |
+| `key_id` | 64 hex | SHA-256 of the receipt key's raw public key |
+| `decision_seq` | integer, optional | the decision's sequence in the stream's decision log, when the decision was recorded |
+| `idempotency_key` | string, optional | standard streams, when one was sent |
+| `commitment_key` | string or null, registries | the key the submission was for |
+| `policy_hash` | `sha256:` and 64 hex, registries | the hash of the registry policy in force at `received_at` |
+| `reasons` | list of strings, optional | reason codes for a refusal |
+
+The **request digest** of an event is `sha256:` followed by the hex
+SHA-256 of the canonical form of `{occurred_at, actor, action, resource,
+payload_sha256, commitment_key}`: the event's fields, its `payload_hash`,
+and the commitment key it was accepted for (null on a standard stream).
+
+**Receipt keys.** The verifier carries a trusted receipt key set
+(`keys/receipt-keys.json`, compiled in), in the shape of
+`/api/v1/receipt-keys`: a `keys` list of `key_id`, `public_key` (hex),
+`created_at`, `retired_at`. `--receipt-keys <file>` replaces it
+wholesale. An entry whose `key_id` is not the SHA-256 of its public key
+is an ERROR in the file, and a receipt names its key by that hash, never
+by anything the receipt supplies beside it.
+
+**The receipt check**, applied by both modes to every receipt:
+
+1. Shape. The fields above with their types (hashes and digests exactly,
+   with no trailing character; the optional fields checked when present),
+   `signed_at` no earlier than `received_at`; otherwise
+   `content_integrity` fails, reason `RECEIPT_SHAPE`.
+2. Key. A `key_id` outside the trusted receipt key set makes
+   `signing_identity` unconfirmed, reason `RECEIPT_KEY_UNKNOWN`, and the
+   signature is not checked further.
+3. Signature. A signature that does not verify fails
+   `content_integrity`, reason `RECEIPT_SIGNATURE`.
+4. Window. The key must have been active at `signed_at`: on or after its
+   `created_at` and, when retired, before its `retired_at`. Otherwise
+   `signing_identity` fails, reason `RECEIPT_KEY_WINDOW`. `signed_at` is
+   judged rather than `received_at` because a receipt owed while the
+   signer was down is signed later, by the key active then, and says so.
+
+### `--receipt`
+
+`verify.php --receipt <receipt.json> [<bundle> [<bundle>]]` applies the
+receipt check and then, for each bundle given (each verified in full
+first, its results combined into the run's), checks the receipt against
+the records it names. A bundle is matched to the receipt by public id:
+the stream's bundle has `stream.public_id` equal to the receipt's
+`stream`, its decision log's bundle has `decision_log_for.public_id`
+equal to it. A bundle matching neither is an ERROR. Every failure below
+fails `content_integrity`, reason `RECEIPT_SUBJECT` unless named.
+
+- With `decision_seq` and the decision log's bundle: the record at that
+  sequence must be `ingress.` followed by the outcome, with its payload's
+  `outcome`, `request_digest`, `digest_kind`, `credential` and
+  `commitment_key` and its `received_at` equal to the receipt's.
+- With a non-null `accepted` and the stream's bundle: the event at
+  `accepted.sequence` must carry `accepted.entry_hash`, and its request
+  digest, computed with the receipt's `commitment_key`, must be
+  `accepted.request_digest`. For `accepted` its `received_at` must equal
+  the receipt's.
+- **Seal deadline.** The record the receipt promises to have sealed (the
+  accepted event for `accepted`, and for a `replay` without
+  `decision_seq`, whose `seal_by` is the original event's; otherwise the
+  decision record, a registry's replay included) must be covered by a checkpoint whose `created_at` is no later
+  than `seal_by`. A later one fails, reason `MSD_BREACH`.
+
+A record outside the bundle's range, or a bundle not given for it, is not
+checked; the run says so in a note and in `receipt.subject`
+(`not_checked`), and passes on the receipt check alone.
+
+### `--reconcile`
+
+`verify.php --reconcile <registry-bundle> <decision-log-bundle>
+[--receipts <dir>]` verifies both bundles in full, then applies the
+rules below in order. Every failure fails `content_integrity`, and the
+document's `reason` names the first rule that failed. `--receipts`
+names a directory of receipt documents (`*.json`, read in name order),
+as a submitter's SDK exports them.
+
+1. **The log is the registry's and is complete** (`NOT_DECISION_LOG`,
+   `LOG_NOT_DENSE`, `NOT_TIME_ORDERED`). The log bundle's `decision_log_for.public_id` names
+   the registry bundle's `stream.public_id`. Both bundles start at
+   sequence 1, so nothing in either history is outside what is checked.
+   Both bundles are written in time order under the registry's lock: in
+   each, every event's `received_at` is no earlier than the one before it
+   (`NOT_TIME_ORDERED`). Export the full history of each, the log first
+   and the registry after it. A record past one bundle's range is then
+   either later than that bundle's export or missing from it, and rules 6
+   and 10 tell the two apart where the bundles can: a record received
+   before the bundle's last record is missing, and so is one due to be
+   sealed (its `received_at` plus the policy's `msd_seconds`, or its
+   receipt's `seal_by`) at least 120 seconds before the bundle was known
+   complete (the grace a checkpoint signed in time needs to commit, which
+   the application's own seal watch allows too). Every record of a
+   registry and of its log is held to that deadline, an acceptance's log
+   record included. A
+   bundle is known complete at its latest checkpoint's `created_at` or,
+   when later, the latest `genTime` of an anchor in it that verifies
+   against trusted roots: the bundle was exported after both, and no
+   operator can backdate an anchor. A record neither rule places is
+   unconfirmed, never passed: export the other bundle again.
+2. **The log opens on its policy** (`FIRST_NOT_POLICY`). Event 1 is
+   `policy.committed`.
+3. **Every policy is what its hash says** (`POLICY_HASH`).
+   `policy.committed` and `policy.amended` carry `version`,
+   `policy_hash`, `effective_at` and `policy`, the policy without its
+   windows, and `windows: {count, parts}`; the windows follow in
+   `policy.windows` records `{version, part, parts, windows}`, parts 1 to
+   `parts` in order. Each policy with its windows joined back must hash,
+   canonically, to its `policy_hash`, and hold `count` windows.
+4. **Every policy is this registry's, amended only as allowed**
+   (`POLICY_AMENDMENT`). Each policy's `registry` is the registry's public
+   id: the log's own signed records, not the manifest, bind it to the
+   registry. Versions run 1, 2, 3 in log order, version 1
+   `policy.committed` and every later one `policy.amended`. Every policy's
+   `msd_seconds` is 900, the seal delay every receipt's `seal_by` is signed
+   with. A policy whose
+   `amendment` is `notice` has an integer `notice_seconds` from 3600 to
+   3155760000 (an hour to a hundred years). A version may be amended only
+   when its `amendment` is `notice` and it is in force: the amendment's
+   record has a `received_at` no earlier than the amended version's
+   `effective_at`, so a pending amendment is never itself amended. The
+   amendment's `effective_at` is no earlier than its record's
+   `received_at` plus the amended version's `notice_seconds`.
+5. **Every decision follows the registry's state and the policy in
+   force** (`DECISION_POLICY`). The registry's state at each record is
+   read from the log: active from the start, paused after `stream.paused`,
+   active again after `stream.resumed`, archived after `stream.archived`.
+   A `refused_paused` decision is made while paused and a
+   `refused_archived` one while archived; `accepted`, `replay`,
+   `conflict`, `invalid`, `refused_early` and `refused_late` only while
+   active. For each `ingress.` record, the policy in force at its
+   `received_at` is the last policy record before it in the log whose
+   `effective_at` is not after that time; there must be one, and the
+   decision's `policy_hash` is its hash. Against that policy's windows: an
+   `accepted` key has a window with `open_at` <= `received_at` <
+   `close_at`; a `replay` or `conflict` key has such a window too, and an
+   earlier `ingress.accepted` of the key, whose `accepted` its own
+   `accepted` repeats (`sequence`, `entry_hash`, `request_digest`), with
+   the same `request_digest` for a replay and a different one for a
+   conflict; a `refused_early` key has a window it came before; a
+   `refused_late` key has a window it came at or after the close of; an
+   `invalid` decision whose `reasons` include `unknown_key` names a key
+   the policy holds no window for. Not checked, as the log holds nothing
+   to check them against: `refused_scope` and `throttled` decisions, and
+   an `invalid` decision's other reasons.
+6. **Acceptances and events match one to one** (`ACCEPTED_UNMATCHED`,
+   `PARENT_UNMATCHED`). Every `ingress.accepted` names, in
+   `accepted.sequence` and `accepted.entry_hash`, an event of the
+   registry whose request digest (with the decision's `commitment_key`)
+   is the decision's `request_digest` and whose `received_at` is the
+   decision's. An acceptance of a sequence past the registry bundle's
+   `range.to` fails when rule 1 places its event in that bundle's range
+   (the acceptance came before the bundle's last event, or the event was
+   due sealed by the time the bundle was known complete), and otherwise
+   leaves the run unconfirmed (`ACCEPTED_UNMATCHED`, scope). Every event
+   of the registry is named by exactly one, except events past every
+   sequence the log accepts and received after the log's last record
+   whose decision, due sealed at the event's `received_at` plus the
+   policy's `msd_seconds`, rule 1 does not place in the log's range:
+   their decisions may be past the log's export, and they leave the run
+   unconfirmed (`PARENT_UNMATCHED`, scope).
+7. **One acceptance per key** (`DOUBLE_ACCEPTANCE`).
+8. **Every window closes once, truthfully** (`WINDOW_CLOSE`). A
+   `window.closed` names a `key` in the policy whose hash it carries, with
+   that window's `close_at`, at most once per policy and key; its
+   `outcome` is `committed`, naming the accepted event, exactly when an
+   acceptance for the key has a `received_at` before `close_at`, and
+   `missing` otherwise. Every window of a policy in force at its
+   `close_at` (the latest version whose `effective_at` is not after it)
+   that closed more than five minutes before the last record of the log
+   (the latest `received_at` in sequence order) has its `window.closed`.
+   "In force" is decided in log order: the last policy record before it
+   in the log whose `effective_at` is not after the `close_at`. A window
+   whose `key` is not a string names no key.
+9. **Every acceptance came from a valid credential**
+   (`CREDENTIAL_NOT_VALID`). The credentials able to submit are built in
+   log order: each `credentials.snapshot` record (one or more parts, each
+   with a `credentials` list of `credential`, `expires_at`) and each
+   `credential.issued` adds, each `credential.revoked` and
+   `credential.expired` removes. An acceptance's
+   `credential` must be in the set at its sequence, with an `expires_at`
+   that is null or after its `received_at`.
+10. **Every receipt is logged, and holds** (`RECEIPT_NOT_LOGGED`). Each
+   receipt of the registry's stream in `--receipts` passes the receipt
+   check (its reason codes apply), carries a `decision_seq`, and the
+   decision record there matches it field for field, `policy_hash`
+   included; then the rest of the `--receipt` check applies against the
+   two bundles, the records it names and its seal deadline included
+   (`RECEIPT_SUBJECT`, `MSD_BREACH`). A receipt whose `decision_seq` is
+   past the log bundle's `range.to` fails when rule 1 places its record
+   in the log's range (it was received before the log's last record, or
+   its `seal_by`, which is its decision record's deadline too, came by the
+   time the log was known complete), and otherwise leaves the run
+   unconfirmed (`RECEIPT_NOT_LOGGED`, scope). A receipt
+   naming another stream is noted and set aside; a file that is not a
+   receipt document fails `RECEIPT_SHAPE` and counts as checked. The
+   directory's files are its regular files whose names end in `.json` and
+   do not begin with a dot, in byte order of their names. A receipt the log
+   does not hold is proof the operator omitted a decision it signed for.
+
+The run reports how many decisions (`ingress.` records) the log holds,
+including any whose payload is absent, per outcome and per credential,
+and how many receipts it checked. `reason` names only receipt and
+registry checks, and a failure's code outranks an unconfirmed one's (a
+receipt signed by an unknown key, or a record past the other bundle's
+range): a bundle that fails gives `BUNDLE`,
+while one that is only unconfirmed leaves `reason` null and the run
+unconfirmed. What it cannot show is a
+request that never reached Sigilbase: nobody can prove that, and the
+report says so.
 
 ## Verifier behaviour
 
