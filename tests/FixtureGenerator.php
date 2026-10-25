@@ -517,7 +517,13 @@ final class FixtureGenerator
             throw new RuntimeException("could not create [{$zipPath}]");
         }
 
-        foreach (['manifest.json', 'events.ndjson', 'checkpoints.json', 'connection.json'] as $file) {
+        $files = ['manifest.json', 'events.ndjson', 'checkpoints.json', 'connection.json', 'documents.json', 'signatures.json', 'links.json'];
+
+        foreach (glob($dir.DIRECTORY_SEPARATOR.'certificates'.DIRECTORY_SEPARATOR.'*') ?: [] as $certificate) {
+            $files[] = 'certificates/'.basename($certificate);
+        }
+
+        foreach ($files as $file) {
             if (! is_file($dir.DIRECTORY_SEPARATOR.$file)) {
                 continue;
             }
