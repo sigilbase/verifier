@@ -41,7 +41,7 @@ final class RegistryHistory
 
     public const SECOND = 'sgb_second00000002';
 
-    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause', 'backdated-tail', 'stale-log', 'truncated-tail', 'truncated-accept'];
+    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause', 'backdated-tail', 'stale-log', 'truncated-tail', 'truncated-accept', 'long-seal-delay'];
 
     /**
      * The variant's own changes to the first policy's rules, while it is written.
@@ -134,6 +134,7 @@ final class RegistryHistory
         self::$rules = match ($variant) {
             'pending-amendment' => ['amendment' => 'notice', 'notice_seconds' => 86400],
             'negative-notice' => ['amendment' => 'notice', 'notice_seconds' => -86400],
+            'long-seal-delay' => ['msd_seconds' => 1000000000000],
             default => [],
         };
 
@@ -270,6 +271,9 @@ final class RegistryHistory
             // A notice period of minus a day: an amendment could take effect
             // a day before it was made.
             'negative-notice' => null,
+            // A seal delay of 31,700 years: no record would ever be due
+            // sealed, so a missing one could never be told from a later one.
+            'long-seal-delay' => null,
             // Paused, a refusal while paused, resumed.
             'paused' => array_push($decisions,
                 self::record('2026-07-01T11:21:00.000000Z', 'stream.paused', ['v' => 1], 'user:owner-1'),
