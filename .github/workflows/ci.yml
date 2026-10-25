@@ -93,7 +93,7 @@ jobs:
 
       # The mirror must be exact: the two repositories release together.
       - run: |
-          for f in corpus vectors keys/sigilbase.json keys/tsa-roots.pem result.schema.json; do
+          for f in corpus vectors keys/sigilbase.json keys/receipt-keys.json keys/tsa-roots.pem result.schema.json; do
             diff -r -q "verifier/$f" "verifier-go/$f"
           done
           diff -q verifier/verify.php verifier-go/reference/verify.php
