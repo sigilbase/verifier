@@ -10,12 +10,12 @@ declare(strict_types=1);
  *   <variant>-registry.zip, <variant>-log.zip   a registry and its decision log
  *   receipts/                  every receipt the valid history's submitters hold
  *   receipts-unlogged/         those plus one signed receipt the log does not hold
+ *   receipts-later/            those plus one for a decision after the log's export
  *   receipt-keys.json          the corpus receipt key, active
  *   receipt-keys-retired.json  the same key, retired before the receipts were signed
  *   receipt-tampered.json      a valid receipt with its outcome changed after signing
  *
- * where <variant> is valid, deleted-decision, extra-event,
- * double-acceptance, missing-close, revoked-credential and late-seal.
+ * where <variant> is each of RegistryHistory::VARIANTS.
  *
  * Run from the repository root:
  *
@@ -112,12 +112,31 @@ foreach (RegistryHistory::VARIANTS as $variant) {
 foreach ($receipts as $name => $receipt) {
     $put('receipts/'.$name, $json($receipt));
     $put('receipts-unlogged/'.$name, $json($receipt));
+    $put('receipts-later/'.$name, $json($receipt));
 }
 
-// A receipt Sigilbase signed for a decision its log does not hold.
-$unlogged = RegistryHistory::receipt((object) [
+// A receipt for a decision after the log's last record, at 11:20: made
+// after the log's export, it cannot be checked yet.
+$later = RegistryHistory::receipt((object) [
     'seq' => 14,
     'received_at' => '2026-07-01T11:25:00.000000Z',
+    'payload' => (object) [
+        'outcome' => 'refused_late',
+        'commitment_key' => 'acme-q3',
+        'request_digest' => 'sha256:'.hash('sha256', 'a submission after the export'),
+        'digest_kind' => 'canonical',
+        'credential' => RegistryHistory::FILER,
+        'accepted' => null,
+        'reasons' => [],
+    ],
+], RegistryHistory::policy()['hash']);
+$put('receipts-later/14-refused_late.json', $json($later));
+
+// A receipt Sigilbase signed for a decision its log does not hold: from
+// 11:15, before the log's last record.
+$unlogged = RegistryHistory::receipt((object) [
+    'seq' => 14,
+    'received_at' => '2026-07-01T11:15:00.000000Z',
     'payload' => (object) [
         'outcome' => 'refused_late',
         'commitment_key' => 'acme-q3',

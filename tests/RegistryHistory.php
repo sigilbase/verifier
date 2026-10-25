@@ -21,7 +21,8 @@ use DateTimeImmutable;
  *
  * Each variant breaks one reconcile rule while keeping both bundles
  * genuinely signed, the way an operator who rewrote its own history would
- * have to: only the registry rules can catch it.
+ * have to: only the registry rules can catch it. A few (registry-ahead,
+ * paused) are honest histories the rules must let pass.
  */
 final class RegistryHistory
 {
@@ -40,7 +41,14 @@ final class RegistryHistory
 
     public const SECOND = 'sgb_second00000002';
 
-    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log'];
+    public const VARIANTS = ['valid', 'deleted-decision', 'extra-event', 'double-acceptance', 'missing-close', 'revoked-credential', 'late-seal', 'late-acceptance', 'frozen-amended', 'live-log', 'registry-ahead', 'phantom-acceptance', 'false-conflict', 'pending-amendment', 'negative-notice', 'paused', 'false-pause'];
+
+    /**
+     * The variant's own changes to the first policy's rules, while it is written.
+     *
+     * @var array<string, mixed>
+     */
+    private static array $rules = [];
 
     /**
      * The receipt key: [public key hex, secret key, key_id].
@@ -74,9 +82,10 @@ final class RegistryHistory
     }
 
     /**
+     * @param  array<string, mixed>|null  $overrides  changes to the rules; the variant's own when null
      * @return array{rules: object, windows: list<object>, hash: string}
      */
-    public static function policy(): array
+    public static function policy(?array $overrides = null): array
     {
         [, , $keyId] = self::receiptKey();
 
@@ -95,6 +104,10 @@ final class RegistryHistory
             'receipt_key_id' => $keyId,
             'amendment' => 'frozen',
         ];
+
+        foreach ($overrides ?? self::$rules as $field => $value) {
+            $rules->{$field} = $value;
+        }
 
         $windows = [
             (object) ['key' => 'acme-q3', 'open_at' => '2026-07-01T09:00:00.000000Z', 'close_at' => '2026-07-01T12:00:00.000000Z'],
@@ -118,6 +131,12 @@ final class RegistryHistory
      */
     public static function write(string $seed, string $dir, string $variant): array
     {
+        self::$rules = match ($variant) {
+            'pending-amendment' => ['amendment' => 'notice', 'notice_seconds' => 86400],
+            'negative-notice' => ['amendment' => 'notice', 'notice_seconds' => -86400],
+            default => [],
+        };
+
         $registryGenerator = new FixtureGenerator($seed, self::REGISTRY_STREAM);
         $logGenerator = new FixtureGenerator($seed, self::LOG_STREAM);
 
@@ -136,7 +155,7 @@ final class RegistryHistory
             $registrySpecs[] = self::submission('beta-q3', '2026-07-01T11:25:00.000000Z', 'filer:beta', 'bb');
         }
 
-        if ($variant === 'live-log') {
+        if ($variant === 'live-log' || $variant === 'registry-ahead') {
             $registrySpecs[] = self::submission('delta-q3', '2026-07-01T11:30:00.000000Z', 'filer:delta', 'ee');
         }
 
@@ -225,6 +244,38 @@ final class RegistryHistory
             'live-log' => array_push($decisions,
                 self::decision('accepted', '2026-07-01T11:30:00.000000Z', 'delta-q3', $registrySpecs[2]['digest'], self::FILER, $registryEvents[2], $registrySpecs[2]['digest']),
             ),
+            // delta-q3 accepted at 11:30, after the log was exported: the
+            // registry bundle, exported after it, holds the event.
+            'registry-ahead' => null,
+            // delta-q3 accepted at 09:40 as a third registry event, which the
+            // registry, holding events to 11:05, never had.
+            'phantom-acceptance' => array_splice($decisions, 8, 0, [
+                self::decision('accepted', '2026-07-01T09:40:00.000000Z', 'delta-q3', self::otherDigest('delta-phantom'), self::FILER, (object) ['seq' => 3, 'entry_hash' => str_repeat('ab', 32)], self::otherDigest('delta-phantom')),
+            ]),
+            // delta-q3's first filing refused as a conflict with a holder
+            // that was never accepted.
+            'false-conflict' => array_splice($decisions, 8, 0, [
+                self::decision('conflict', '2026-07-01T09:40:00.000000Z', 'delta-q3', self::otherDigest('delta-first'), self::FILER, (object) ['seq' => 99, 'entry_hash' => str_repeat('cd', 32)], self::otherDigest('delta-holder'), ['digest_mismatch']),
+            ]),
+            // Version 2, under the full day's notice, asks only an hour of its
+            // own; version 3 amends it while it is still pending.
+            'pending-amendment' => array_splice($decisions, 8, 0, [
+                ...self::amendment(2, ['notice_seconds' => 3600], '2026-07-01T09:40:00.000000Z', '2026-07-02T09:40:00.000000Z'),
+                ...self::amendment(3, ['notice_seconds' => 3600], '2026-07-01T09:45:00.000000Z', '2026-07-02T10:45:00.000000Z'),
+            ]),
+            // A notice period of minus a day: an amendment could take effect
+            // a day before it was made.
+            'negative-notice' => null,
+            // Paused, a refusal while paused, resumed.
+            'paused' => array_push($decisions,
+                self::record('2026-07-01T11:21:00.000000Z', 'stream.paused', ['v' => 1], 'user:owner-1'),
+                self::decision('refused_paused', '2026-07-01T11:22:00.000000Z', 'delta-q3', self::otherDigest('delta-paused'), self::FILER, null, null),
+                self::record('2026-07-01T11:23:00.000000Z', 'stream.resumed', ['v' => 1], 'user:owner-1'),
+            ),
+            // A refusal for a pause the log never records.
+            'false-pause' => array_push($decisions,
+                self::decision('refused_paused', '2026-07-01T11:22:00.000000Z', 'delta-q3', self::otherDigest('delta-paused'), self::FILER, null, null),
+            ),
             default => null,
         };
 
@@ -249,6 +300,8 @@ final class RegistryHistory
             $name = sprintf('%02d-%s.json', $event->seq, substr($event->action, strlen('ingress.')));
             $receipts[$name] = self::receipt($event, $policy['hash']);
         }
+
+        self::$rules = [];
 
         return $receipts;
     }
@@ -355,6 +408,28 @@ final class RegistryHistory
             'received_at' => $at,
             'policy_hash' => self::policy()['hash'],
         ], 'sigilbase:ingress');
+    }
+
+    /**
+     * A later policy version, recorded at $at and effective from
+     * $effectiveAt: the first policy's windows under changed rules.
+     *
+     * @param  array<string, mixed>  $changes
+     * @return list<array{event: array<string, mixed>}>
+     */
+    private static function amendment(int $version, array $changes, string $at, string $effectiveAt): array
+    {
+        $policy = self::policy([...self::$rules, ...$changes]);
+
+        return [
+            self::record($at, 'policy.amended', [
+                'v' => 1, 'version' => $version, 'policy_hash' => $policy['hash'], 'effective_at' => $effectiveAt,
+                'policy' => $policy['rules'], 'windows' => (object) ['count' => count($policy['windows']), 'parts' => 1],
+            ], 'user:owner-1'),
+            self::record($at, 'policy.windows', [
+                'v' => 1, 'version' => $version, 'part' => 1, 'parts' => 1, 'windows' => $policy['windows'],
+            ], 'user:owner-1'),
+        ];
     }
 
     /**

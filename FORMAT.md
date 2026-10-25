@@ -474,9 +474,10 @@ as a submitter's SDK exports them.
    `LOG_NOT_DENSE`). The log bundle's `decision_log_for.public_id` names
    the registry bundle's `stream.public_id`. Both bundles start at
    sequence 1, so nothing in either history is outside what is checked.
-   Export the registry first and its log after: an acceptance in the log
-   of an event past the registry bundle's range, made between the two
-   exports, is then noted and not checked (rule 6).
+   Export the log first and the registry after it. Both are written in
+   time order under the registry's lock, so a record past one bundle's
+   range is either later than that bundle's last record, made after its
+   export, or missing from it: rules 6 and 10 tell the two apart.
 2. **The log opens on its policy** (`FIRST_NOT_POLICY`). Event 1 is
    `policy.committed`.
 3. **Every policy is what its hash says** (`POLICY_HASH`).
@@ -490,28 +491,48 @@ as a submitter's SDK exports them.
    (`POLICY_AMENDMENT`). Each policy's `registry` is the registry's public
    id: the log's own signed records, not the manifest, bind it to the
    registry. Versions run 1, 2, 3 in log order, version 1
-   `policy.committed` and every later one `policy.amended`. A version may
-   be amended only when its `amendment` is `notice`, and the amendment's
-   `effective_at` is then no earlier than its record's `received_at` plus
-   the amended version's `notice_seconds`.
-5. **Every decision follows the policy in force** (`DECISION_POLICY`).
-   For each `ingress.` record, the policy in force at its `received_at`
-   is the last policy record before it in the log whose `effective_at` is
-   not after that time; there must be one, and the decision's
-   `policy_hash` is its hash. Against that policy's windows: an
+   `policy.committed` and every later one `policy.amended`. A policy whose
+   `amendment` is `notice` has an integer `notice_seconds` from 3600 to
+   3155760000 (an hour to a hundred years). A version may be amended only
+   when its `amendment` is `notice` and it is in force: the amendment's
+   record has a `received_at` no earlier than the amended version's
+   `effective_at`, so a pending amendment is never itself amended. The
+   amendment's `effective_at` is no earlier than its record's
+   `received_at` plus the amended version's `notice_seconds`.
+5. **Every decision follows the registry's state and the policy in
+   force** (`DECISION_POLICY`). The registry's state at each record is
+   read from the log: active from the start, paused after `stream.paused`,
+   active again after `stream.resumed`, archived after `stream.archived`.
+   A `refused_paused` decision is made while paused and a
+   `refused_archived` one while archived; `accepted`, `replay`,
+   `conflict`, `invalid`, `refused_early` and `refused_late` only while
+   active. For each `ingress.` record, the policy in force at its
+   `received_at` is the last policy record before it in the log whose
+   `effective_at` is not after that time; there must be one, and the
+   decision's `policy_hash` is its hash. Against that policy's windows: an
    `accepted` key has a window with `open_at` <= `received_at` <
-   `close_at`; a `refused_early` key has a window it came before; a
+   `close_at`; a `replay` or `conflict` key has such a window too, and an
+   earlier `ingress.accepted` of the key, whose `accepted` its own
+   `accepted` repeats (`sequence`, `entry_hash`, `request_digest`), with
+   the same `request_digest` for a replay and a different one for a
+   conflict; a `refused_early` key has a window it came before; a
    `refused_late` key has a window it came at or after the close of; an
    `invalid` decision whose `reasons` include `unknown_key` names a key
-   the policy holds no window for.
+   the policy holds no window for. Not checked, as the log holds nothing
+   to check them against: `refused_scope` and `throttled` decisions, and
+   an `invalid` decision's other reasons.
 6. **Acceptances and events match one to one** (`ACCEPTED_UNMATCHED`,
    `PARENT_UNMATCHED`). Every `ingress.accepted` names, in
    `accepted.sequence` and `accepted.entry_hash`, an event of the
    registry whose request digest (with the decision's `commitment_key`)
    is the decision's `request_digest` and whose `received_at` is the
-   decision's; an acceptance of a sequence past the registry bundle's
-   `range.to` is noted instead. Every event of the registry is named by
-   exactly one.
+   decision's. An acceptance of a sequence past the registry bundle's
+   `range.to`, received no earlier than the bundle's last event, leaves
+   the run unconfirmed (`ACCEPTED_UNMATCHED`, scope): export the registry
+   again. Every event of the registry is named by exactly one, except
+   events past every sequence the log accepts and received after the
+   log's last record, which were decided after the log's export and are
+   noted.
 7. **One acceptance per key** (`DOUBLE_ACCEPTANCE`).
 8. **Every window closes once, truthfully** (`WINDOW_CLOSE`). A
    `window.closed` names a `key` in the policy whose hash it carries, with
@@ -539,7 +560,10 @@ as a submitter's SDK exports them.
    decision record there matches it field for field, `policy_hash`
    included; then the rest of the `--receipt` check applies against the
    two bundles, the records it names and its seal deadline included
-   (`RECEIPT_SUBJECT`, `MSD_BREACH`). A receipt
+   (`RECEIPT_SUBJECT`, `MSD_BREACH`). A receipt whose `decision_seq` is
+   past the log bundle's `range.to`, received no earlier than the log's
+   last record, leaves the run unconfirmed (`RECEIPT_NOT_LOGGED`, scope):
+   export the log again. A receipt
    naming another stream is noted and set aside; a file that is not a
    receipt document fails `RECEIPT_SHAPE` and counts as checked. The
    directory's files are its regular files whose names end in `.json` and
@@ -550,7 +574,8 @@ The run reports how many decisions (`ingress.` records) the log holds,
 including any whose payload is absent, per outcome and per credential,
 and how many receipts it checked. `reason` names only receipt and
 registry checks, and a failure's code outranks an unconfirmed one's (a
-receipt signed by an unknown key): a bundle that fails gives `BUNDLE`,
+receipt signed by an unknown key, or a record past the other bundle's
+range): a bundle that fails gives `BUNDLE`,
 while one that is only unconfirmed leaves `reason` null and the run
 unconfirmed. What it cannot show is a
 request that never reached Sigilbase: nobody can prove that, and the
