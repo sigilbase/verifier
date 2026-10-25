@@ -117,6 +117,32 @@ people: `actor` is whatever the writing system claimed; the record of the
 claim is what is protected. The output makes no legal claim: it reports
 what was checked and what was not.
 
+## Receipts and registries
+
+Sigilbase answers every append with a signed receipt, and a registry stream
+records every decision it makes, accepted or refused, in its decision log.
+Two modes check them (FORMAT.md, "Receipts and registries"):
+
+```bash
+# A receipt you were given: is it Sigilbase's signature, and do the records
+# it names (pass the stream's bundle and/or its decision log's) say the same?
+# Also checks it was sealed by the deadline it promised (MSD_BREACH if not).
+php verify.php --receipt receipt.json [filings.zip [filings-decisions.zip]]
+
+# A registry with its decision log: every acceptance is a registry event and
+# the reverse, one acceptance per key, every window closed truthfully, every
+# acceptance from a valid credential, and every receipt you hold is logged.
+php verify.php --reconcile filings.zip filings-decisions.zip --receipts receipts/
+```
+
+Receipt keys are trusted the way signing keys are: a set compiled into the
+verifier (`keys/receipt-keys.json`), or `--receipt-keys <file>` in the shape
+of `https://app.sigilbase.io/api/v1/receipt-keys`. A receipt signed by a key
+the verifier does not trust is UNCONFIRMED. Under `--json`, `reason` names
+the first check that failed, such as `RECEIPT_NOT_LOGGED`: a receipt
+Sigilbase signed for a decision its log does not hold. What no one can show
+is a request that never reached Sigilbase at all.
+
 ## In a pipeline
 
 The verifier-go repository carries a GitLab CI template
