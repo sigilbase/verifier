@@ -482,7 +482,11 @@ as a submitter's SDK exports them.
    and 10 tell the two apart where the bundles can: a record received
    before the bundle's last record is missing, and so is one due to be
    sealed (its `received_at` plus the policy's `msd_seconds`, or its
-   receipt's `seal_by`) no later than the bundle was known complete. A
+   receipt's `seal_by`) at least 120 seconds before the bundle was known
+   complete (the grace a checkpoint signed in time needs to commit, which
+   the application's own seal watch allows too). Every record of a
+   registry and of its log is held to that deadline, an acceptance's log
+   record included. A
    bundle is known complete at its latest checkpoint's `created_at` or,
    when later, the latest `genTime` of an anchor in it that verifies
    against trusted roots: the bundle was exported after both, and no
@@ -542,7 +546,9 @@ as a submitter's SDK exports them.
    due sealed by the time the bundle was known complete), and otherwise
    leaves the run unconfirmed (`ACCEPTED_UNMATCHED`, scope). Every event
    of the registry is named by exactly one, except events past every
-   sequence the log accepts and received after the log's last record:
+   sequence the log accepts and received after the log's last record
+   whose decision, due sealed at the event's `received_at` plus the
+   policy's `msd_seconds`, rule 1 does not place in the log's range:
    their decisions may be past the log's export, and they leave the run
    unconfirmed (`PARENT_UNMATCHED`, scope).
 7. **One acceptance per key** (`DOUBLE_ACCEPTANCE`).
@@ -574,10 +580,10 @@ as a submitter's SDK exports them.
    two bundles, the records it names and its seal deadline included
    (`RECEIPT_SUBJECT`, `MSD_BREACH`). A receipt whose `decision_seq` is
    past the log bundle's `range.to` fails when rule 1 places its record
-   in the log's range (it was received before the log's last record, or,
-   for any outcome but `accepted`, whose `seal_by` is its event's, its
-   `seal_by` is no later than the log was known complete), and otherwise
-   leaves the run unconfirmed (`RECEIPT_NOT_LOGGED`, scope). A receipt
+   in the log's range (it was received before the log's last record, or
+   its `seal_by`, which is its decision record's deadline too, came by the
+   time the log was known complete), and otherwise leaves the run
+   unconfirmed (`RECEIPT_NOT_LOGGED`, scope). A receipt
    naming another stream is noted and set aside; a file that is not a
    receipt document fails `RECEIPT_SHAPE` and counts as checked. The
    directory's files are its regular files whose names end in `.json` and
