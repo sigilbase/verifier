@@ -104,8 +104,12 @@ gains `public_id`, the stream's public identifier (the one its receipts and
 its transparency feed name), and a decision log's bundle carries
 `decision_log_for`, naming the stream whose decisions it records (`id`,
 `public_id`, `slug`). Both are read only by the `--receipt` and
-`--reconcile` modes; ordinary verification ignores them, so a bundle
-verifies exactly as it would at 1.6. Nothing about the hashing or
+`--reconcile` modes, at whatever format id the bundle carries (an
+exporter may add them before it moves to 1.7, as unknown fields are
+ignored); ordinary verification ignores them, so a bundle verifies exactly
+as it would at 1.6. The manifest is the bundle's own claim: `--reconcile`
+also binds the log to the registry through each policy's signed
+`registry` field. Nothing about the hashing or
 verification mathematics changes.
 
 ## Bundle contents
@@ -448,8 +452,9 @@ fails `content_integrity`, reason `RECEIPT_SUBJECT` unless named.
   `accepted.request_digest`. For `accepted` its `received_at` must equal
   the receipt's.
 - **Seal deadline.** The record the receipt promises to have sealed (the
-  accepted event for `accepted` and `replay`; otherwise the decision
-  record) must be covered by a checkpoint whose `created_at` is no later
+  accepted event for `accepted`, and for a `replay` without
+  `decision_seq`, whose `seal_by` is the original event's; otherwise the
+  decision record, a registry's replay included) must be covered by a checkpoint whose `created_at` is no later
   than `seal_by`. A later one fails, reason `MSD_BREACH`.
 
 A record outside the bundle's range, or a bundle not given for it, is not
@@ -469,6 +474,9 @@ as a submitter's SDK exports them.
    `LOG_NOT_DENSE`). The log bundle's `decision_log_for.public_id` names
    the registry bundle's `stream.public_id`. Both bundles start at
    sequence 1, so nothing in either history is outside what is checked.
+   Export the registry first and its log after: an acceptance in the log
+   of an event past the registry bundle's range, made between the two
+   exports, is then noted and not checked (rule 6).
 2. **The log opens on its policy** (`FIRST_NOT_POLICY`). Event 1 is
    `policy.committed`.
 3. **Every policy is what its hash says** (`POLICY_HASH`).
@@ -478,14 +486,34 @@ as a submitter's SDK exports them.
    `policy.windows` records `{version, part, parts, windows}`, parts 1 to
    `parts` in order. Each policy with its windows joined back must hash,
    canonically, to its `policy_hash`, and hold `count` windows.
-4. **Acceptances and events match one to one** (`ACCEPTED_UNMATCHED`,
+4. **Every policy is this registry's, amended only as allowed**
+   (`POLICY_AMENDMENT`). Each policy's `registry` is the registry's public
+   id: the log's own signed records, not the manifest, bind it to the
+   registry. Versions run 1, 2, 3 in log order, version 1
+   `policy.committed` and every later one `policy.amended`. A version may
+   be amended only when its `amendment` is `notice`, and the amendment's
+   `effective_at` is then no earlier than its record's `received_at` plus
+   the amended version's `notice_seconds`.
+5. **Every decision follows the policy in force** (`DECISION_POLICY`).
+   For each `ingress.` record, the policy in force at its `received_at`
+   is the last policy record before it in the log whose `effective_at` is
+   not after that time; there must be one, and the decision's
+   `policy_hash` is its hash. Against that policy's windows: an
+   `accepted` key has a window with `open_at` <= `received_at` <
+   `close_at`; a `refused_early` key has a window it came before; a
+   `refused_late` key has a window it came at or after the close of; an
+   `invalid` decision whose `reasons` include `unknown_key` names a key
+   the policy holds no window for.
+6. **Acceptances and events match one to one** (`ACCEPTED_UNMATCHED`,
    `PARENT_UNMATCHED`). Every `ingress.accepted` names, in
    `accepted.sequence` and `accepted.entry_hash`, an event of the
    registry whose request digest (with the decision's `commitment_key`)
    is the decision's `request_digest` and whose `received_at` is the
-   decision's. Every event of the registry is named by exactly one.
-5. **One acceptance per key** (`DOUBLE_ACCEPTANCE`).
-6. **Every window closes once, truthfully** (`WINDOW_CLOSE`). A
+   decision's; an acceptance of a sequence past the registry bundle's
+   `range.to` is noted instead. Every event of the registry is named by
+   exactly one.
+7. **One acceptance per key** (`DOUBLE_ACCEPTANCE`).
+8. **Every window closes once, truthfully** (`WINDOW_CLOSE`). A
    `window.closed` names a `key` in the policy whose hash it carries, with
    that window's `close_at`, at most once per policy and key; its
    `outcome` is `committed`, naming the accepted event, exactly when an
@@ -497,7 +525,7 @@ as a submitter's SDK exports them.
    "In force" is decided in log order: the last policy record before it
    in the log whose `effective_at` is not after the `close_at`. A window
    whose `key` is not a string names no key.
-7. **Every acceptance came from a valid credential**
+9. **Every acceptance came from a valid credential**
    (`CREDENTIAL_NOT_VALID`). The credentials able to submit are built in
    log order: each `credentials.snapshot` record (one or more parts, each
    with a `credentials` list of `credential`, `expires_at`) and each
@@ -505,10 +533,13 @@ as a submitter's SDK exports them.
    `credential.expired` removes. An acceptance's
    `credential` must be in the set at its sequence, with an `expires_at`
    that is null or after its `received_at`.
-8. **Every receipt is logged** (`RECEIPT_NOT_LOGGED`). Each receipt of
-   the registry's stream in `--receipts` passes the receipt check (its
-   reason codes apply), carries a `decision_seq`, and the decision record
-   there matches it field for field as `--receipt` requires. A receipt
+10. **Every receipt is logged, and holds** (`RECEIPT_NOT_LOGGED`). Each
+   receipt of the registry's stream in `--receipts` passes the receipt
+   check (its reason codes apply), carries a `decision_seq`, and the
+   decision record there matches it field for field, `policy_hash`
+   included; then the rest of the `--receipt` check applies against the
+   two bundles, the records it names and its seal deadline included
+   (`RECEIPT_SUBJECT`, `MSD_BREACH`). A receipt
    naming another stream is noted and set aside; a file that is not a
    receipt document fails `RECEIPT_SHAPE` and counts as checked. The
    directory's files are its regular files whose names end in `.json` and
@@ -518,8 +549,10 @@ as a submitter's SDK exports them.
 The run reports how many decisions (`ingress.` records) the log holds,
 including any whose payload is absent, per outcome and per credential,
 and how many receipts it checked. `reason` names only receipt and
-registry checks: a bundle that fails gives `BUNDLE`, while one that is
-only unconfirmed leaves `reason` null and the run unconfirmed. What it cannot show is a
+registry checks, and a failure's code outranks an unconfirmed one's (a
+receipt signed by an unknown key): a bundle that fails gives `BUNDLE`,
+while one that is only unconfirmed leaves `reason` null and the run
+unconfirmed. What it cannot show is a
 request that never reached Sigilbase: nobody can prove that, and the
 report says so.
 

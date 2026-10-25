@@ -237,6 +237,71 @@ final class RegistryCorpusTest extends TestCase
         self::assertSame('RECEIPT_SHAPE', $document['reason']);
     }
 
+    public function testAFailureOutranksAnUnconfirmedReceiptAsTheReason(): void
+    {
+        $expected = self::expected();
+        $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sigilbase-mixed-'.bin2hex(random_bytes(4));
+        mkdir($dir);
+
+        // First in name order: a receipt signed by a key nobody trusts.
+        $stranger = json_decode((string) file_get_contents(dirname(__DIR__).'/corpus/registry/receipts/04-accepted.json'), false);
+        $secret = sodium_crypto_sign_secretkey(sodium_crypto_sign_keypair());
+        $stranger->body->key_id = hash('sha256', sodium_crypto_sign_publickey_from_secretkey($secret));
+        $stranger->signature = RegistryHistory::sign($stranger->body, $secret);
+        file_put_contents($dir.'/00-stranger.json', json_encode($stranger));
+        copy(dirname(__DIR__).'/corpus/registry/receipts-unlogged/14-refused_late.json', $dir.'/14-refused_late.json');
+
+        try {
+            $document = $this->verify([...$expected['default_options'], ...$expected['receipt_options'], '--reconcile', 'corpus/registry/valid-registry.zip', 'corpus/registry/valid-log.zip', '--receipts', $dir]);
+        } finally {
+            array_map('unlink', glob($dir.'/*.json') ?: []);
+            rmdir($dir);
+        }
+
+        self::assertSame('fail', $document['result']);
+        self::assertSame('RECEIPT_NOT_LOGGED', $document['reason']);
+    }
+
+    public function testAWindowWithoutACloseIsNotAWarning(): void
+    {
+        require_once dirname(__DIR__).'/verify.php';
+
+        $window = (object) ['key' => 'k-q1', 'open_at' => '2026-07-01T09:00:00.000000Z'];
+        $rules = (object) ['v' => 1, 'registry' => 'r'];
+        $full = clone $rules;
+        $full->windows = [$window];
+        $hash = 'sha256:'.hash('sha256', canonical_encode($full));
+        $record = static fn (int $seq, string $action, object $payload): object => (object) ['seq' => $seq, 'received_at' => '2026-07-01T11:00:00.000000Z', 'action' => $action, 'payload' => $payload];
+        $view = static fn (array $manifest, array $events): array => ['manifest' => json_decode((string) json_encode($manifest), false), 'events' => $events, 'checkpoints' => []];
+
+        $GLOBALS['failures'] = [];
+        $GLOBALS['notes'] = [];
+        $GLOBALS['reason'] = null;
+        $GLOBALS['unconfirmedReason'] = null;
+        $GLOBALS['quiet'] = true;
+        $GLOBALS['results'] = ['content_integrity' => 'pass', 'signing_identity' => 'pass', 'timestamps' => 'pass', 'scope' => 'pass', 'redactions' => 'pass'];
+
+        set_error_handler(static function (int $severity, string $message): never {
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            reconcile_registry(
+                $view(['stream' => ['public_id' => 'r'], 'range' => ['from' => 1, 'to' => 0]], []),
+                $view(['decision_log_for' => ['public_id' => 'r'], 'range' => ['from' => 1, 'to' => 3]], [
+                    1 => $record(1, 'policy.committed', (object) ['version' => 1, 'policy_hash' => $hash, 'effective_at' => '2026-07-01T09:00:00.000000Z', 'policy' => $rules, 'windows' => (object) ['count' => 1, 'parts' => 1]]),
+                    2 => $record(2, 'policy.windows', (object) ['version' => 1, 'part' => 1, 'parts' => 1, 'windows' => [$window]]),
+                    3 => $record(3, 'window.closed', (object) ['key' => 'k-q1', 'outcome' => 'missing', 'accepted' => null, 'close_at' => '2026-07-01T10:00:00.000000Z', 'policy_hash' => $hash]),
+                ]),
+                [],
+            );
+        } finally {
+            restore_error_handler();
+        }
+
+        self::assertStringContainsString('WINDOW_CLOSE', implode("\n", $GLOBALS['failures']));
+    }
+
     public function testOrdinaryVerificationOfARegistryBundleIsUnchanged(): void
     {
         $expected = self::expected();

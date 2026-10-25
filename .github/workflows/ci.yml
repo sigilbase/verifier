@@ -59,9 +59,12 @@ jobs:
       # to both lands as two branches of one name: when verifier-go has a
       # branch named like this one, that branch is the one held to it.
       - id: go-ref
+        # The branch name reaches the shell as data, never as script text.
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          branch="${{ github.head_ref || github.ref_name }}"
-          if git ls-remote --exit-code --heads https://github.com/sigilbase/verifier-go.git "$branch" >/dev/null 2>&1; then
+          branch="$BRANCH"
+          if git ls-remote --exit-code --heads https://github.com/sigilbase/verifier-go.git "refs/heads/$branch" >/dev/null 2>&1; then
             echo "ref=$branch" >> "$GITHUB_OUTPUT"
           else
             echo "ref=main" >> "$GITHUB_OUTPUT"
