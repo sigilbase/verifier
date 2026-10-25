@@ -20,8 +20,12 @@ declare(strict_types=1);
  *   sigilsign-link-action.zip        a link's linked_sequence names a document.published event
  *   sigilsign-link-sha.zip           a link states a hash its document.linked event does not carry
  *   sigilsign-malformed.zip          documents.json without a documents list
- *   sigilsign-numeric-members.zip    sigilsign.zip with members named "7" and "0" in all three
- *                                    blocks: unknown fields, ignored like any other
+ *   sigilsign-numeric-members.zip    sigilsign.zip with integer-named members ("7", "0") holding
+ *                                    integers, at the top of all three blocks, in each record
+ *                                    and in a version and a signer: unknown fields, ignored
+ *   sigilsign-float-seq.zip          sigilsign.zip with the first event's seq written 1.5: the
+ *                                    chain fails, and the SigilSign pass reads it without a
+ *                                    warning ahead of the --json document
  *   certificate-sha.zip              a certificate whose bytes do not match its manifest sha256
  *   certificate-missing.zip          a certificate listed in the manifest but not in the bundle
  *   certificate-unsafe-path.zip      a certificate listed at a path outside certificates/
@@ -158,7 +162,7 @@ $certificates = static fn (?string $file = null, ?string $sha = null): array => 
 /**
  * @param  array<string, mixed>  $blocks  file name => decoded content (null leaves the file out)
  */
-$build = static function (string $name, array $specs, array $blocks, array $manifest, bool $withCertificate = true) use ($root, $seed, $stream, $work, $entries, $json, $certificate, $certificateId, &$changed): void {
+$build = static function (string $name, array $specs, array $blocks, array $manifest, bool $withCertificate = true, ?Closure $alter = null) use ($root, $seed, $stream, $work, $entries, $json, $certificate, $certificateId, &$changed): void {
     $generator = new FixtureGenerator($seed, $stream);
     $dir = $work.DIRECTORY_SEPARATOR.$name;
     $generator->writeStreamBundle($dir, array_values($specs), [
@@ -172,6 +176,10 @@ $build = static function (string $name, array $specs, array $blocks, array $mani
         if ($content !== null) {
             file_put_contents($dir.DIRECTORY_SEPARATOR.$file, is_string($content) ? $content : $json($content));
         }
+    }
+
+    if ($alter !== null) {
+        $alter($dir);
     }
 
     if ($withCertificate) {
@@ -229,22 +237,35 @@ $build('sigilsign-link-sha', $history(), $blocks(['links.json' => $wrongLinkSha]
 
 $build('sigilsign-malformed', $history(), $blocks(['documents.json' => ['documents' => ['msa' => $documents()['documents'][0]]]]), $certificates());
 
-// Members whose names are integers ("7", "0"), in every block and at every
-// depth the cross-checks walk. They are fields the verifier does not know:
-// ignored, and the bundle reads as sigilsign.zip does.
+// Members whose names are integers ("7", "0") holding integers, at the top
+// of every block, in each record, and in a version and a signer: the shape
+// that stopped 1.8.0. They are fields the verifier does not know: ignored,
+// and the bundle reads as sigilsign.zip does.
 $numeric = static function (array $block, string $list): array {
-    $block['7'] = ['0' => 'unknown', 'sequence' => 'not an integer'];
+    $block['7'] = 7;
+    $block['0'] = ['0' => 'unknown', 'sequence' => 'not an integer', '7' => 7];
     $block[$list][0]['0'] = ['7' => 7];
 
     return $block;
 };
+$numericDocuments = $numeric($documents(), 'documents');
+$numericDocuments['documents'][0]['versions'][0]['7'] = 7;
 $numericSignatures = $numeric($signatures(), 'signatures');
-$numericSignatures['signatures'][0]['signers'][0]['7'] = 'unknown';
+$numericSignatures['signatures'][0]['signers'][0]['7'] = 7;
 $build('sigilsign-numeric-members', $history(), $blocks([
-    'documents.json' => $numeric($documents(), 'documents'),
+    'documents.json' => $numericDocuments,
     'signatures.json' => $numericSignatures,
     'links.json' => $numeric($links(), 'links'),
 ]), $certificates());
+
+// A seq that is not an integer: PHP would warn converting it to an array
+// key, and with display_errors on that lands ahead of the --json document.
+$build('sigilsign-float-seq', $history(), $blocks(), $certificates(), alter: static function (string $dir): void {
+    $path = $dir.DIRECTORY_SEPARATOR.'events.ndjson';
+    $lines = explode("\n", (string) file_get_contents($path));
+    $lines[0] = str_replace('"seq":1,', '"seq":1.5,', $lines[0]);
+    file_put_contents($path, implode("\n", $lines));
+});
 
 $build('certificate-sha', $history(), $blocks(), $certificates(sha: hash('sha256', 'some other certificate')));
 $build('certificate-missing', $history(), $blocks(), $certificates(), withCertificate: false);
