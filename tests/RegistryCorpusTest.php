@@ -153,6 +153,90 @@ final class RegistryCorpusTest extends TestCase
         self::assertSame(2, $document['exit_code']);
     }
 
+    public function testAKeyIdWithATrailingNewlineIsMisshapen(): void
+    {
+        $expected = self::expected();
+        $receipt = json_decode((string) file_get_contents(dirname(__DIR__).'/corpus/registry/receipts/04-accepted.json'), false);
+        $receipt->body->key_id .= "\n";
+        $receipt->signature = RegistryHistory::sign($receipt->body);
+        $path = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sigilbase-newline-'.bin2hex(random_bytes(4)).'.json';
+        file_put_contents($path, json_encode($receipt));
+
+        try {
+            $document = $this->verify([...$expected['default_options'], ...$expected['receipt_options'], '--receipt', $path]);
+        } finally {
+            unlink($path);
+        }
+
+        self::assertSame('RECEIPT_SHAPE', $document['reason']);
+    }
+
+    public function testAWindowWhoseKeyIsNotTextNamesNoKey(): void
+    {
+        $window = (object) ['key' => ['not', 'text'], 'open_at' => '2026-07-01T09:00:00.000000Z', 'close_at' => '2026-07-01T09:30:00.000000Z'];
+        $rules = (object) ['v' => 1];
+        $full = clone $rules;
+        $full->windows = [$window];
+        $hash = 'sha256:'.hash('sha256', canonical_encode($full));
+
+        $record = static fn (int $seq, string $at, string $action, object $payload): object => (object) ['seq' => $seq, 'received_at' => $at, 'action' => $action, 'payload' => $payload];
+
+        $log = [
+            1 => $record(1, '2026-07-01T09:00:00.000000Z', 'policy.committed', (object) ['version' => 1, 'policy_hash' => $hash, 'effective_at' => '2026-07-01T09:00:00.000000Z', 'policy' => $rules, 'windows' => (object) ['count' => 1, 'parts' => 1]]),
+            2 => $record(2, '2026-07-01T09:00:00.000000Z', 'policy.windows', (object) ['version' => 1, 'part' => 1, 'parts' => 1, 'windows' => [$window]]),
+            3 => $record(3, '2026-07-01T11:00:00.000000Z', 'ingress.invalid', (object) ['outcome' => 'invalid', 'credential' => 'k']),
+        ];
+
+        $view = static fn (array $manifest, array $events): array => ['manifest' => json_decode((string) json_encode($manifest), false), 'events' => $events, 'checkpoints' => []];
+
+        require_once dirname(__DIR__).'/verify.php';
+
+        // The overdue window is reported as unclosed under the empty key,
+        // and the run goes on: no TypeError from a key that is an array.
+        // Required inside a method, verify.php's top-level state is local to
+        // the require: the run's globals are set here instead.
+        $GLOBALS['failures'] = [];
+        $GLOBALS['notes'] = [];
+        $GLOBALS['reason'] = null;
+        $GLOBALS['quiet'] = true;
+        $GLOBALS['results'] = ['content_integrity' => 'pass', 'signing_identity' => 'pass', 'timestamps' => 'pass', 'scope' => 'pass', 'redactions' => 'pass'];
+        $GLOBALS['trustedReceiptKeys'] = [];
+        $result = reconcile_registry(
+            $view(['stream' => ['public_id' => 'r'], 'range' => ['from' => 1, 'to' => 0]], []),
+            $view(['decision_log_for' => ['public_id' => 'r'], 'range' => ['from' => 1, 'to' => 3]], $log),
+            [],
+        );
+
+        self::assertSame(1, $result['counts']['decisions']);
+        self::assertStringContainsString('WINDOW_CLOSE: key []', implode("\n", $GLOBALS['failures']));
+    }
+
+    public function testEveryReceiptFileInTheDirectoryIsCountedAndNothingElse(): void
+    {
+        $expected = self::expected();
+        $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sigilbase-receipts-[x]-'.bin2hex(random_bytes(4));
+        mkdir($dir);
+        mkdir($dir.'/sub.json');
+        copy(dirname(__DIR__).'/corpus/registry/receipts/04-accepted.json', $dir.'/a.json');
+        copy(dirname(__DIR__).'/corpus/registry/receipts/04-accepted.json', $dir.'/.hidden.json');
+        file_put_contents($dir.'/b.json', '{"not": "a receipt"}');
+        file_put_contents($dir.'/c.txt', 'ignored');
+
+        try {
+            $document = $this->verify([...$expected['default_options'], ...$expected['receipt_options'], '--reconcile', 'corpus/registry/valid-registry.zip', 'corpus/registry/valid-log.zip', '--receipts', $dir]);
+        } finally {
+            foreach (['a.json', '.hidden.json', 'b.json', 'c.txt'] as $file) {
+                unlink($dir.'/'.$file);
+            }
+
+            rmdir($dir.'/sub.json');
+            rmdir($dir);
+        }
+
+        self::assertSame(2, $document['receipts_checked']);
+        self::assertSame('RECEIPT_SHAPE', $document['reason']);
+    }
+
     public function testOrdinaryVerificationOfARegistryBundleIsUnchanged(): void
     {
         $expected = self::expected();

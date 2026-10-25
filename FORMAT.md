@@ -412,9 +412,10 @@ by anything the receipt supplies beside it.
 
 **The receipt check**, applied by both modes to every receipt:
 
-1. Shape. The fields above with their types, `signed_at` no earlier
-   than `received_at`; otherwise `content_integrity` fails, reason
-   `RECEIPT_SHAPE`.
+1. Shape. The fields above with their types (hashes and digests exactly,
+   with no trailing character; the optional fields checked when present),
+   `signed_at` no earlier than `received_at`; otherwise
+   `content_integrity` fails, reason `RECEIPT_SHAPE`.
 2. Key. A `key_id` outside the trusted receipt key set makes
    `signing_identity` unconfirmed, reason `RECEIPT_KEY_UNKNOWN`, and the
    signature is not checked further.
@@ -492,23 +493,33 @@ as a submitter's SDK exports them.
    `missing` otherwise. Every window of a policy in force at its
    `close_at` (the latest version whose `effective_at` is not after it)
    that closed more than five minutes before the last record of the log
-   has its `window.closed`.
+   (the latest `received_at` in sequence order) has its `window.closed`.
+   "In force" is decided in log order: the last policy record before it
+   in the log whose `effective_at` is not after the `close_at`. A window
+   whose `key` is not a string names no key.
 7. **Every acceptance came from a valid credential**
-   (`CREDENTIAL_NOT_VALID`). The credentials able to submit are those of
-   `credentials.snapshot` (`credentials`, in parts like the windows),
-   then each `credential.issued` adds one and each `credential.revoked`
-   and `credential.expired` removes one, in log order. An acceptance's
+   (`CREDENTIAL_NOT_VALID`). The credentials able to submit are built in
+   log order: each `credentials.snapshot` record (one or more parts, each
+   with a `credentials` list of `credential`, `expires_at`) and each
+   `credential.issued` adds, each `credential.revoked` and
+   `credential.expired` removes. An acceptance's
    `credential` must be in the set at its sequence, with an `expires_at`
    that is null or after its `received_at`.
 8. **Every receipt is logged** (`RECEIPT_NOT_LOGGED`). Each receipt of
    the registry's stream in `--receipts` passes the receipt check (its
    reason codes apply), carries a `decision_seq`, and the decision record
    there matches it field for field as `--receipt` requires. A receipt
-   naming another stream is noted and set aside. A receipt the log does
-   not hold is proof the operator omitted a decision it signed for.
+   naming another stream is noted and set aside; a file that is not a
+   receipt document fails `RECEIPT_SHAPE` and counts as checked. The
+   directory's files are its regular files whose names end in `.json` and
+   do not begin with a dot, in byte order of their names. A receipt the log
+   does not hold is proof the operator omitted a decision it signed for.
 
-The run reports how many decisions the log holds, per outcome and per
-credential, and how many receipts it checked. What it cannot show is a
+The run reports how many decisions (`ingress.` records) the log holds,
+including any whose payload is absent, per outcome and per credential,
+and how many receipts it checked. `reason` names only receipt and
+registry checks: a bundle that fails gives `BUNDLE`, while one that is
+only unconfirmed leaves `reason` null and the run unconfirmed. What it cannot show is a
 request that never reached Sigilbase: nobody can prove that, and the
 report says so.
 
