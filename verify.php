@@ -4019,7 +4019,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             }
 
             note('links.json: '.count_noun($resolvedLinks, 'link fact').($resolvedLinks === 1 ? ' resolves' : ' resolve')." to their ledgered document.linked/document.unlinked events with matching hashes");
-            note('a link records that the exporting tenant associated a document with these events at a provable time; it asserts nothing about legal effect, which this verifier neither checks nor reports');
+            note('a link records that the exporting workspace associated a document with these events at a provable time; it asserts nothing about legal effect, which this verifier neither checks nor reports');
         }
     }
 
@@ -5641,7 +5641,7 @@ if (! $consistencyMode) {
         out("No event has been modified, deleted, or reordered, and every checkpoint signature is genuine.\n");
 
         if ($result['redacted_count'] > 0) {
-            out('Redactions: '.count_noun($result['redacted_count'], 'payload').($result['redacted_count'] === 1 ? ' was' : ' were')." destroyed by the tenant, each named by an authenticated declaration in this bundle; their hashes are preserved and the chain is intact.\n");
+            out('Redactions: '.count_noun($result['redacted_count'], 'payload').($result['redacted_count'] === 1 ? ' was' : ' were')." destroyed by the workspace, each named by an authenticated declaration in this bundle; their hashes are preserved and the chain is intact.\n");
         }
 
         if (($result['collection'] ?? null) !== null) {
