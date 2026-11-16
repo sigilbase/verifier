@@ -359,9 +359,9 @@ $trustedTsaRootsSource = 'built-in trusted set';
 /**
  * "1 problem", "2 problems": a count with its noun in the right number.
  */
-function count_noun(int $count, string $noun): string
+function count_noun(int $count, string $noun, ?string $plural = null): string
 {
-    return $count.' '.$noun.($count === 1 ? '' : 's');
+    return $count.' '.($count === 1 ? $noun : ($plural ?? $noun.'s'));
 }
 
 function out(string $text): void
@@ -2033,7 +2033,7 @@ function check_declarations(
 
     $count = count($absentSequences);
 
-    out("Checking declarations for {$count} absent payload(s)...\n");
+    out('Checking declarations for '.count_noun($count, 'absent payload')."...\n");
 
     // A bundle older than 1.5 carries no declarations at all, so an absent
     // payload in one cannot be checked against anything. Saying so plainly
@@ -2041,7 +2041,7 @@ function check_declarations(
     // and the fix is to export it again.
     if (! in_array($format, ['sigilbase-evidence/1.5', 'sigilbase-evidence/1.6', 'sigilbase-evidence/1.7'], true)) {
         report(
-            "this bundle is {$format} and carries {$count} absent payload(s). Formats before "
+            "this bundle is {$format} and carries ".count_noun($count, 'absent payload').". Formats before "
             .'sigilbase-evidence/1.5 do not carry the declarations that destroyed them, so the absences cannot be '
             .'verified. Export the range again from Sigilbase to get a bundle that can be.',
             RESULT_REDACTIONS,
@@ -2878,7 +2878,7 @@ function check_collection_records(string $dir, string $eventsPath, int $rangeFro
                     if (! is_int($receiptCount) || $receiptCount < 0) {
                         report("{$label}: receipts.count must be a non-negative integer");
                     } elseif ($anchored ? $receiptCount !== $state['receipts'] : $receiptCount < $state['receipts']) {
-                        report("{$label}: receipts.count is {$receiptCount} but {$state['receipts']} receipt(s) precede it in the chain");
+                        report("{$label}: receipts.count is {$receiptCount} but ".count_noun($state['receipts'], 'receipt').($state['receipts'] === 1 ? ' precedes' : ' precede').' it in the chain');
                     }
                 }
 
@@ -3016,11 +3016,11 @@ function check_collection_records(string $dir, string $eventsPath, int $rangeFro
 
     foreach ($streams as $state) {
         note(sprintf(
-            'stream %s: %d receipt(s) chained, %d gap(s) declared, %d settlement record(s)',
+            'stream %s: %s chained, %s declared, %s',
             $state['key'],
-            $state['receipts'],
-            count($state['gaps']),
-            $state['settlements'],
+            count_noun($state['receipts'], 'receipt'),
+            count_noun(count($state['gaps']), 'gap'),
+            count_noun($state['settlements'], 'settlement record'),
         ));
     }
 
@@ -3103,7 +3103,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
 
     out("Stream: {$streamId}\n");
     out("Range:  {$rangeFrom}..{$rangeTo}\n");
-    out('Keys:   '.count($trustedKeys)." trusted signing key(s) in manifest\n\n");
+    out('Keys:   '.count_noun(count($trustedKeys), 'trusted signing key')." in manifest\n\n");
 
     // ---- redactions.json (1.2, optional) -------------------------------------
 
@@ -3598,7 +3598,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
         $anchors = is_object($anchorDocument) && is_array($anchorDocument->anchors ?? null) ? $anchorDocument->anchors : [];
 
         if ($anchors !== [] && $skipAnchors) {
-            out('Skipping '.count($anchors)." RFC 3161 anchor token(s) (--skip-anchors).\n");
+            out('Skipping '.count_noun(count($anchors), 'RFC 3161 anchor token')." (--skip-anchors).\n");
             demote(RESULT_TIMESTAMPS, 'not_checked');
         } elseif ($anchors === []) {
             demote(RESULT_TIMESTAMPS, 'not_checked');
@@ -3694,7 +3694,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
     $certificateRecords = is_array($manifest->certificates ?? null) ? $manifest->certificates : [];
 
     if ($certificateRecords !== []) {
-        out('Checking '.count($certificateRecords)." Certificate(s) of Evidence (certificates/)...\n");
+        out('Checking '.count_noun(count($certificateRecords), 'Certificate of Evidence', 'Certificates of Evidence')." (certificates/)...\n");
 
         foreach ($certificateRecords as $index => $record) {
             $recordId = is_string($record->id ?? null) ? $record->id : ('#'.($index + 1));
@@ -3721,7 +3721,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
             }
         }
 
-        note(count($certificateRecords).' Certificate(s) of Evidence travelled with this bundle. They are documents about the evidence; the cryptographic verification above does not depend on them');
+        note(count_noun(count($certificateRecords), 'Certificate of Evidence', 'Certificates of Evidence').' travelled with this bundle. They are documents about the evidence; the cryptographic verification above does not depend on them');
     }
 
     // ---- documents.json / signatures.json / links.json (format 1.4, optional) -
@@ -3955,7 +3955,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 }
             }
 
-            note("signatures.json: {$checkedSignatures} signature(s) verified against their ledgered events: viewed and signed hashes agree");
+            note('signatures.json: '.count_noun($checkedSignatures, 'signature')." verified against their ledgered events: viewed and signed hashes agree");
             note('signatures.json is informational metadata: its facts are cross-checked against the chain above, and everything else in it, including any claim about legal effect or validity, is ignored and cannot influence the verdict');
         }
     }
@@ -4018,7 +4018,7 @@ function verify_bundle(string $target, bool $skipAnchors, bool $collectLeaves = 
                 }
             }
 
-            note("links.json: {$resolvedLinks} link fact(s) resolve to their ledgered document.linked/document.unlinked events with matching hashes");
+            note('links.json: '.count_noun($resolvedLinks, 'link fact').($resolvedLinks === 1 ? ' resolves' : ' resolve')." to their ledgered document.linked/document.unlinked events with matching hashes");
             note('a link records that the exporting tenant associated a document with these events at a provable time; it asserts nothing about legal effect, which this verifier neither checks nor reports');
         }
     }
@@ -5119,7 +5119,7 @@ function reconcile_registry(array $registry, array $log, array $receiptPaths): a
         }
 
         if ($count !== 1) {
-            reason_fail('PARENT_UNMATCHED', "registry event {$sequence} is accepted by {$count} decision(s), not exactly one");
+            reason_fail('PARENT_UNMATCHED', "registry event {$sequence} is accepted by ".count_noun($count, 'decision').", not exactly one");
         }
     }
 
@@ -5641,13 +5641,13 @@ if (! $consistencyMode) {
         out("No event has been modified, deleted, or reordered, and every checkpoint signature is genuine.\n");
 
         if ($result['redacted_count'] > 0) {
-            out("Redactions: {$result['redacted_count']} payload(s) were destroyed by the tenant, each named by an authenticated declaration in this bundle; their hashes are preserved and the chain is intact.\n");
+            out('Redactions: '.count_noun($result['redacted_count'], 'payload').($result['redacted_count'] === 1 ? ' was' : ' were')." destroyed by the tenant, each named by an authenticated declaration in this bundle; their hashes are preserved and the chain is intact.\n");
         }
 
         if (($result['collection'] ?? null) !== null) {
             $collection = $result['collection'];
 
-            out("Collection records: {$collection['receipts']} receipt(s) chained on {$collection['streams']} stream(s), {$collection['gaps']} gap(s) declared, {$collection['settlements']} settlement record(s); every link inside the range holds.\n");
+            out('Collection records: '.count_noun($collection['receipts'], 'receipt').' chained on '.count_noun($collection['streams'], 'stream').', '.count_noun($collection['gaps'], 'gap').' declared, '.count_noun($collection['settlements'], 'settlement record')."; every link inside the range holds.\n");
         }
 
         if ($code === EXIT_UNCONFIRMED) {
@@ -5744,7 +5744,7 @@ if (count($targets) === 2 && $recordedRoot === null && $recordedSize === null) {
 
                 out('  old  tree_size='.$old['range_to'].' root='.bin2hex($oldRoot)."\n");
                 out('  new  tree_size='.$new['range_to'].' root='.bin2hex($newRoot)."\n");
-                out('  proof '.count($proof)." node(s) verified\n");
+                out('  proof '.count_noun(count($proof), 'node')." verified\n");
             }
         }
     }

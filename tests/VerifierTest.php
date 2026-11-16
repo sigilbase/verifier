@@ -176,7 +176,7 @@ final class VerifierTest extends TestCase
         self::assertSame(1, $run['code']);
         self::assertStringContainsString('expected sequence 2 here: an event was deleted, inserted, or reordered', $run['stdout']);
         self::assertStringNotContainsString("\u{2014}", $run['stdout']);
-        self::assertStringNotContainsString('(s) found', $run['stdout']);
+        self::assertStringNotContainsString('(s)', $run['stdout']);
         self::assertMatchesRegularExpression('/FAIL: (1 problem|\d+ problems) found\./', $run['stdout']);
     }
 
