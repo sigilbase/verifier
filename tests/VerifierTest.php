@@ -160,6 +160,52 @@ final class VerifierTest extends TestCase
         self::assertStringContainsString('deleted, inserted, or reordered', $run['stdout']);
     }
 
+    // -- Wording ----------------------------------------------------------------
+
+    public function testFailureLinesCarryNoEmDashAndCountsAgreeInNumber(): void
+    {
+        $dir = $this->bundleDir();
+        $path = $dir.DIRECTORY_SEPARATOR.'events.ndjson';
+
+        $lines = explode("\n", trim((string) file_get_contents($path)));
+        unset($lines[1]);
+        file_put_contents($path, implode("\n", array_values($lines))."\n");
+
+        $run = $this->runVerifier([$dir]);
+
+        self::assertSame(1, $run['code']);
+        self::assertStringContainsString('expected sequence 2 here: an event was deleted, inserted, or reordered', $run['stdout']);
+        self::assertStringNotContainsString("\u{2014}", $run['stdout']);
+        self::assertStringNotContainsString('(s) found', $run['stdout']);
+        self::assertMatchesRegularExpression('/FAIL: (1 problem|\d+ problems) found\./', $run['stdout']);
+    }
+
+    public function testTheSummaryCountsAgreeInNumber(): void
+    {
+        $run = $this->runVerifier([$this->bundleDir()]);
+
+        self::assertSame(0, $run['code'], $run['stdout'].$run['stderr']);
+        self::assertMatchesRegularExpression('/\d+ events? and \d+ checkpoints? verified/', $run['stdout']);
+        self::assertDoesNotMatchRegularExpression('/\b1 (events|checkpoints)\b/', $run['stdout']);
+    }
+
+    public function testAKeyOutsideTheTrustedSetIsNotAmongIt(): void
+    {
+        $keys = $this->workDir.DIRECTORY_SEPARATOR.'other-keys.json';
+        file_put_contents($keys, (string) json_encode(['keys' => [[
+            'key_id' => str_repeat('0', 16),
+            'public_key' => str_repeat('11', 32),
+            'algorithm' => 'ed25519',
+            'created_at' => '2026-01-01T00:00:00.000000Z',
+            'retired_at' => null,
+        ]]]));
+
+        $run = $this->runVerifier(['--keys', $keys, $this->bundleDir()]);
+
+        self::assertStringContainsString('which is not among the --keys', $run['stdout']);
+        self::assertStringNotContainsString('which is not in the', $run['stdout']);
+    }
+
     public function testReorderedEventsFail(): void
     {
         $dir = $this->bundleDir();
