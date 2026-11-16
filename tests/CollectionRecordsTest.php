@@ -49,8 +49,8 @@ final class CollectionRecordsTest extends TestCase
 
         self::assertSame(0, $run['code'], $run['stdout'].$run['stderr']);
         self::assertStringContainsString('Checking collection records', $run['stdout']);
-        self::assertStringContainsString('stream records: 3 receipt(s) chained, 1 gap(s) declared, 3 settlement record(s)', $run['stdout']);
-        self::assertStringContainsString('Collection records: 3 receipt(s) chained on 1 stream(s), 1 gap(s) declared, 3 settlement record(s)', $run['stdout']);
+        self::assertStringContainsString('stream records: 3 receipts chained, 1 gap declared, 3 settlement records', $run['stdout']);
+        self::assertStringContainsString('Collection records: 3 receipts chained on 1 stream, 1 gap declared, 3 settlement records', $run['stdout']);
         self::assertStringContainsString('connection.json is absent', $run['stdout']);
     }
 
@@ -164,7 +164,7 @@ final class CollectionRecordsTest extends TestCase
         $run = $this->verify($this->bundle(CollectionHistory::healed()));
 
         self::assertSame(0, $run['code'], $run['stdout'].$run['stderr']);
-        self::assertStringContainsString('stream records: 4 receipt(s) chained, 1 gap(s) declared, 4 settlement record(s)', $run['stdout']);
+        self::assertStringContainsString('stream records: 4 receipts chained, 1 gap declared, 4 settlement records', $run['stdout']);
     }
 
     public function testAHealNamingAGapTheChainNeverDeclaredFails(): void
@@ -221,7 +221,7 @@ final class CollectionRecordsTest extends TestCase
 
         self::assertSame(0, $run['code'], $run['stdout'].$run['stderr']);
         self::assertStringContainsString('the receipt chain enters this range at receipt 2; its link to receipt 1 lies before the range', $run['stdout']);
-        self::assertStringContainsString('stream records: 2 receipt(s) chained, 1 gap(s) declared, 3 settlement record(s)', $run['stdout']);
+        self::assertStringContainsString('stream records: 2 receipts chained, 1 gap declared, 3 settlement records', $run['stdout']);
     }
 
     public function testConnectionJsonThatContradictsTheChainFails(): void
